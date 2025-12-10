@@ -110,8 +110,6 @@ import json
 import csv
 from datetime import datetime
 from typing import Dict, List, Set, Optional, Tuple, Any, Callable
-
-# External dependencies
 import psutil
 import socket
 import ipaddress
@@ -121,36 +119,21 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 import concurrent.futures
 import winreg
-
-# Core modules
-from core.exceptions import (
-    WinDetoxError, SecurityError, FirewallError, BlocklistError,
-    UpdateError, ValidationError, PermissionError, DetailedError
-)
-from core.utils import (
-    is_admin, run_as_admin, is_local_ip, get_hosts_backup_path,
-    safe_subprocess_run, verify_file_signature
-)
+from core.exceptions import WinDetoxError, SecurityError, FirewallError, BlocklistError, UpdateError, ValidationError, PermissionError, DetailedError
+from core.utils import is_admin, run_as_admin, is_local_ip, get_hosts_backup_path, safe_subprocess_run, verify_file_signature
 from core.config import Config
 from core.logger import Logger, RotatingLogger
-
-# Managers
 from managers.settings_manager import SettingsManager
 from managers.update_manager import UpdateManager
-
-# Network modules
 from network.ip_validator import IPValidator, validate_ip_address, normalize_ip_address
 from network.blocklist_manager import BlocklistManager
 from network.firewall_manager import FirewallManager
 from network.ip_info_cache import IPAnalyzer, IPInfoCache
 from network.network_service import NetworkService
 from network.network_monitor import NetworkMonitor, ConnectionInfo
-
-# UI modules
 from ui.system_tray import SystemTrayManager
 from ui.blocked_ips_viewer import BlockedIPsViewer
 from ui.main_window import WinDetoxGUI
-
 
 class WinDetoxGUI:
     """
@@ -161,131 +144,191 @@ class WinDetoxGUI:
     2. Coordinates between NetworkMonitor (scanner) and NetworkService (blocker)
     3. Handles user interactions and updates display
     4. Manages SystemTray integration
-    """
     
-    def __init__(self, 
-                 root: tk.Tk, 
-                 logger: Logger = None,
-                 network_service: NetworkService = None,
-                 settings_manager: SettingsManager = None,
-                 update_manager: UpdateManager = None):
+    KEY PARTS:
+    • setup_gui() - Creates all GUI widgets and tabs
+    • start/stop_monitoring() - Controls NetworkMonitor
+    • block/unblock methods - Uses NetworkService
+    • Various event handlers - on_new_connection(), etc.
+    
+    DEPENDENCIES:
+    • Uses: NetworkMonitor, NetworkService, SystemTrayManager
+    • Used by: main() function (entry point)
+    """
+
+    def __init__(self, root: tk.Tk, logger: Logger=None, network_service: NetworkService=None, settings_manager: SettingsManager=None, update_manager: UpdateManager=None):
         """INITIALIZATION - SETS UP ALL COMPONENTS"""
-        
         self.root = root
-        self.root.title(f"{Config.WINDOW_TITLE} v{Config.CURRENT_VERSION}")
+        self.root.title(f'{Config.WINDOW_TITLE} v{Config.CURRENT_VERSION}')
         self.root.geometry(Config.WINDOW_GEOMETRY)
         self.mutex = None
-        
-        # Initialize logger FIRST (before any other operations)
         self.logger = logger or Logger()
-        
-        # Set up window icon
-        self._setup_window_icon()
-        
-        # Check startup arguments
-        self.is_autostart_mode = '--minimized' in sys.argv and not self._check_interactive_session()
-        self.start_minimized = '--minimized' in sys.argv
-        
-        # Initialize managers and services
-        self.tray_manager = None
-        self.settings = settings_manager or SettingsManager()
-        self.update_manager = update_manager or UpdateManager(logger=self.logger)
-        
-        # Initialize network service
-        self.network_service = network_service or NetworkService(
-            logger=self.logger,
-            blocklist_manager=BlocklistManager(logger=self.logger),
-            firewall_manager=FirewallManager(logger=self.logger)
-        )
-        
-        # Initialize network monitor
-        self.monitor = NetworkMonitor(logger=self.logger)
-        
-        # Set up callbacks
-        self.monitor.on_new_connection = self.on_new_connection
-        self.monitor.on_connection_closed = self.on_connection_closed
-        self.monitor.on_update = self.on_update
-        
-        # Initialize data structures
-        self.connection_history: List[ConnectionInfo] = []
-        self.current_connections: List[ConnectionInfo] = []
-        
-        # Setup context menu
-        self.context_menu = Menu(self.root, tearoff=0)
-        self.context_menu.add_command(label="Block IP", command=self.block_selected_ip)
-        self.context_menu.add_separator()
-        self.context_menu.add_command(label="Show Details", command=self.show_connection_details)
-        
-        # Build GUI
-        self.setup_gui()
-        
-        # Initial checks and timers
-        self.root.after(100, self.check_admin_on_startup)
-        self.root.after(5000, self._periodic_update)
-        
-        # Check for updates on startup if enabled
-        if self.settings.get('check_updates_on_start', True):
-            self.root.after(30000, self.auto_check_for_updates)
-        
-        # Initialize system tray with appropriate timing
-        if not self.start_minimized:
-            self.setup_system_tray()
-        else:
-            self.root.after(3000, self.setup_system_tray_delayed)
-        
-        # Handle minimized startup
-        if self.start_minimized and self.settings.get('start_minimized', False):
-            self.root.withdraw()
-        
-        # Setup window closing protocol
-        self.setup_window_protocol()
-        
-        # Auto-start monitoring if setting is enabled
-        if self.settings.get('start_monitoring_on_start', True):
-            self.root.after(1000, self.start_monitoring)
-        
-        # Initialize update tracking
-        self._pending_tree_updates: List[ConnectionInfo] = []
-        self._update_scheduled = False
-        
-        # Register cleanup on exit
-        atexit.register(self.cleanup)
-    
-    def _setup_window_icon(self):
-        """Set up window icon with multiple fallback paths"""
         try:
-            # Get base path
             if getattr(sys, 'frozen', False):
-                base_path = os.path.dirname(sys.executable)  # Running as compiled executable
+                base_path = os.path.dirname(sys.executable)
             else:
-                base_path = os.path.dirname(os.path.abspath(__file__))  # Running as script
-            
-            # Try multiple icon locations
-            icon_paths = [
-                os.path.join(base_path, 'icon.ico'),
-                os.path.join(os.path.dirname(base_path), 'icon.ico'),
-                os.path.join(os.getcwd(), 'icon.ico'),
-                'icon.ico'  # Last resort
-            ]
-            
+                base_path = os.path.dirname(os.path.abspath(__file__))
+            icon_paths = [os.path.join(base_path, 'icon.ico'), os.path.join(os.path.dirname(base_path), 'icon.ico'), os.path.join(os.getcwd(), 'icon.ico'), 'icon.ico']
             icon_loaded = False
             for icon_path in icon_paths:
                 if os.path.exists(icon_path):
                     try:
                         self.root.iconbitmap(icon_path)
-                        self.logger.info(f"Loaded window icon from: {icon_path}")
+                        self.logger.info(f'Loaded window icon from: {icon_path}')
                         icon_loaded = True
                         break
                     except Exception as e:
-                        self.logger.debug(f"Failed to load icon from {icon_path}: {e}")
+                        self.logger.debug(f'Failed to load icon from {icon_path}: {e}')
                         continue
-            
             if not icon_loaded:
-                self.logger.info("No icon file found, using default window icon")
-                
+                self.logger.info('No icon file found, using default window icon')
         except Exception as e:
-            self.logger.debug(f"Icon loading failed: {e}")
-    
+            self.logger.debug(f'Icon loading failed: {e}')
+        self.is_autostart_mode = '--minimized' in sys.argv and (not self._check_interactive_session())
+        self.start_minimized = '--minimized' in sys.argv
+        self.tray_manager = None
+        self.settings = settings_manager or SettingsManager()
+        self.update_manager = update_manager or UpdateManager(logger=self.logger)
+        self.network_service = network_service or NetworkService(logger=self.logger, blocklist_manager=BlocklistManager(logger=self.logger), firewall_manager=FirewallManager(logger=self.logger))
+        self.monitor = NetworkMonitor(logger=self.logger)
+        self.monitor.on_new_connection = self.on_new_connection
+        self.monitor.on_connection_closed = self.on_connection_closed
+        self.monitor.on_update = self.on_update
+        self.connection_history: List[ConnectionInfo] = []
+        self.current_connections: List[ConnectionInfo] = []
+        self.context_menu = Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label='Block IP', command=self.block_selected_ip)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label='Show Details', command=self.show_connection_details)
+        self.setup_gui()
+        self.root.after(100, self.check_admin_on_startup)
+        self.root.after(5000, self._periodic_update)
+        if self.settings.get('check_updates_on_start', True):
+            self.root.after(30000, self.auto_check_for_updates)
+        if not self.start_minimized:
+            self.setup_system_tray()
+        else:
+            self.root.after(3000, self.setup_system_tray_delayed)
+        if self.start_minimized and self.settings.get('start_minimized', False):
+            self.root.withdraw()
+        self.setup_window_protocol()
+        if self.settings.get('start_monitoring_on_start', True):
+            self.root.after(1000, self.start_monitoring)
+        self._pending_tree_updates: List[ConnectionInfo] = []
+        self._update_scheduled = False
+        atexit.register(self.cleanup)
+
+    def update_main_status(self, message: str):
+        """Update main status bar with thread-safe operation"""
+
+        def safe_update():
+            self.status_var.set(message)
+            self.root.update_idletasks()
+        if threading.current_thread() is threading.main_thread():
+            safe_update()
+        else:
+            self.root.after(0, safe_update)
+
+    def _check_interactive_session(self):
+        """Check if we're in an interactive user session"""
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetDesktopWindow()
+            if hwnd == 0:
+                self.logger.info('No desktop window - likely not in interactive session')
+                return False
+            process_id = ctypes.windll.kernel32.GetCurrentProcessId()
+            session_id = ctypes.windll.kernel32.ProcessIdToSessionId(process_id, ctypes.byref(ctypes.c_ulong()))
+            WTS_SESSION_INFO = ctypes.c_void_p
+            session_infos = WTS_SESSION_INFO()
+            count = ctypes.c_ulong()
+            if ctypes.windll.wtsapi32.WTSEnumerateSessionsW(0, 0, 1, ctypes.byref(session_infos), ctypes.byref(count)):
+                for i in range(count.value):
+                    pass
+            test_hwnd = ctypes.windll.user32.CreateWindowExW(0, 'Static', 'test', 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            if test_hwnd:
+                ctypes.windll.user32.DestroyWindow(test_hwnd)
+                self.logger.info('Interactive session detected (can create windows)')
+                return True
+            else:
+                self.logger.info('Cannot create windows - likely not interactive session')
+                return False
+        except Exception as e:
+            self.logger.debug(f'Interactive session check failed: {e}')
+            return True
+
+    def setup_system_tray_delayed(self):
+        """Delayed system tray setup for autostart scenarios"""
+        if not self._check_interactive_session():
+            self.logger.info('Not in interactive session, skipping system tray icon')
+            self.tray_manager = None
+            self.settings.set('start_to_tray', False)
+            if hasattr(self, 'start_to_tray_var'):
+                self.start_to_tray_var.set(False)
+            return
+        if self.tray_manager is not None and hasattr(self.tray_manager, 'icon') and self.tray_manager.icon:
+            self.logger.info('System tray icon already exists')
+            return
+        try:
+            self.tray_manager = SystemTrayManager(self.root, self)
+            success = self.tray_manager.create_tray_icon()
+            if not success:
+                self.logger.warning('System tray setup failed')
+                self.tray_manager = None
+                self.settings.set('start_to_tray', False)
+                if hasattr(self, 'start_to_tray_var'):
+                    self.start_to_tray_var.set(False)
+            else:
+                self.logger.info('Delayed system tray setup completed successfully')
+        except Exception as e:
+            self.logger.error(f'Failed delayed system tray setup: {e}')
+            self.tray_manager = None
+            self.settings.set('start_to_tray', False)
+            if hasattr(self, 'start_to_tray_var'):
+                self.start_to_tray_var.set(False)
+
+    def setup_system_tray(self):
+        """Setup system tray icon"""
+        try:
+            self.tray_manager = SystemTrayManager(self.root, self)
+            success = self.tray_manager.create_tray_icon()
+            if not success:
+                self.logger.warning('System tray setup failed, continuing without tray icon')
+                self.tray_manager = None
+                self.settings.set('start_to_tray', False)
+                if hasattr(self, 'start_to_tray_var'):
+                    self.start_to_tray_var.set(False)
+            self.logger.info('System tray setup completed')
+        except Exception as e:
+            self.logger.error(f'Failed to setup system tray: {e}')
+            self.tray_manager = None
+            self.settings.set('start_to_tray', False)
+            if hasattr(self, 'start_to_tray_var'):
+                self.start_to_tray_var.set(False)
+
+    def setup_window_protocol(self):
+        """Setup window closing behavior based on settings"""
+
+        def on_closing():
+            if self.settings.get('start_to_tray', False) and self.tray_manager and self.tray_manager.icon:
+                self.root.withdraw()
+                try:
+                    if hasattr(self.tray_manager, 'show_notification'):
+                        self.tray_manager.show_notification('WinDetox', 'Application minimized to system tray. Right-click tray icon to show window or exit.')
+                    else:
+                        self.log_append('Application minimized to system tray.\n')
+                except:
+                    pass
+            else:
+                self.cleanup_and_exit()
+        self.root.protocol('WM_DELETE_WINDOW', on_closing)
+
+    def check_admin_on_startup(self):
+        """Check admin rights on startup and show warning"""
+        if not is_admin():
+            messagebox.showwarning('No Administrator Rights', "Program is running WITHOUT administrator rights!\n\n⚠️ Firewall rules CANNOT be applied.\n\nPlease run program as administrator:\nRight-click → 'Run as administrator'\n\nMonitoring still works, but IPs will not be blocked!")
+            self.status_var.set('⚠️ NO ADMIN RIGHTS - Firewall blocking disabled')
+
     def setup_gui(self):
         """
         GUI CONSTRUCTION - WHERE ALL WIDGETS ARE CREATED
@@ -296,485 +339,211 @@ class WinDetoxGUI:
         3. Tab 2: History (TreeView of past connections)
         4. Tab 3: IP Blocking (Blocklist management)
         5. Tab 4: Settings (User preferences)
+        
+        To add a new tab:
+        1. Add new frame to notebook
+        2. Create widgets in the frame
+        3. Add event handlers if needed
+        4. Update save_selected_tab() if needed
         """
-        
-        # Main frame
         main = ttk.Frame(self.root, padding=10)
-        main.grid(row=0, column=0, sticky="nsew")
-        
-        # Configure grid weights
+        main.grid(row=0, column=0, sticky='nsew')
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(3, weight=1)  # Notebook gets extra space
-        
-        # ====================
-        # CONTROL BAR
-        # ====================
+        main.rowconfigure(3, weight=1)
         ctrl = ttk.Frame(main)
-        ctrl.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        
-        # Control buttons
-        self.btn_start = ttk.Button(ctrl, text="Start", command=self.start_monitoring)
-        self.btn_start.pack(side="left", padx=5)
-        
-        self.btn_stop = ttk.Button(ctrl, text="Stop", command=self.stop_monitoring, state="disabled")
-        self.btn_stop.pack(side="left", padx=5)
-        
-        ttk.Button(ctrl, text="Clear Log", command=self.clear_log).pack(side="left", padx=5)
-        ttk.Button(ctrl, text="Clear History", command=self.clear_history).pack(side="left", padx=5)
-        ttk.Button(ctrl, text="Export", command=self.export_connections).pack(side="left", padx=5)
-        
-        # Admin button
-        ttk.Button(ctrl, text="Restart as Admin", 
-                  command=lambda: run_as_admin("Restart with administrator privileges?")) \
-                  .pack(side="left", padx=10)
-        
-        # Separator
-        ttk.Separator(ctrl, orient="vertical").pack(side="left", fill="y", padx=10)
-        
-        # ====================
-        # FILTER CONTROLS
-        # ====================
-        ttk.Label(ctrl, text="Filter:", font=("", 9, "bold")).pack(side="left")
-        
-        # Filter variables
-        self.var_inc = tk.BooleanVar(value=True)   # Incoming
-        self.var_out = tk.BooleanVar(value=True)   # Outgoing
-        self.var_lis = tk.BooleanVar(value=True)   # Listening
-        self.var_ext = tk.BooleanVar(value=False)  # External only
-        
-        # Filter checkbuttons
-        ttk.Checkbutton(ctrl, text="Incoming", 
-                       variable=self.var_inc, 
-                       command=self.apply_filters).pack(side="left", padx=5)
-        
-        ttk.Checkbutton(ctrl, text="Outgoing", 
-                       variable=self.var_out, 
-                       command=self.apply_filters).pack(side="left", padx=5)
-        
-        ttk.Checkbutton(ctrl, text="Listening", 
-                       variable=self.var_lis, 
-                       command=self.apply_filters).pack(side="left", padx=5)
-        
-        ttk.Checkbutton(ctrl, text="ONLY EXTERNAL", 
-                       variable=self.var_ext, 
-                       command=self.apply_filters).pack(side="left", padx=10)
-        
-        # ====================
-        # STATISTICS FRAME
-        # ====================
-        stats_frame = ttk.LabelFrame(main, text="Statistics", padding=10)
-        stats_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        
-        self.stats_var = tk.StringVar(value="No data")
-        ttk.Label(stats_frame, textvariable=self.stats_var, font=("", 10)).pack()
-        
-        # ====================
-        # ADMIN STATUS FRAME
-        # ====================
+        ctrl.grid(row=0, column=0, sticky='ew', pady=(0, 10))
+        self.btn_start = ttk.Button(ctrl, text='Start', command=self.start_monitoring)
+        self.btn_start.pack(side='left', padx=5)
+        self.btn_stop = ttk.Button(ctrl, text='Stop', command=self.stop_monitoring, state='disabled')
+        self.btn_stop.pack(side='left', padx=5)
+        ttk.Button(ctrl, text='Clear Log', command=self.clear_log).pack(side='left', padx=5)
+        ttk.Button(ctrl, text='Clear History', command=self.clear_history).pack(side='left', padx=5)
+        ttk.Button(ctrl, text='Export', command=self.export_connections).pack(side='left', padx=5)
+        ttk.Button(ctrl, text='Restart as Admin', command=lambda: run_as_admin('Restart with administrator privileges?')).pack(side='left', padx=10)
+        ttk.Separator(ctrl, orient='vertical').pack(side='left', fill='y', padx=10)
+        ttk.Label(ctrl, text='Filter:', font=('', 9, 'bold')).pack(side='left')
+        self.var_inc = tk.BooleanVar(value=True)
+        self.var_out = tk.BooleanVar(value=True)
+        self.var_lis = tk.BooleanVar(value=True)
+        self.var_ext = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ctrl, text='Incoming', variable=self.var_inc, command=self.apply_filters).pack(side='left', padx=5)
+        ttk.Checkbutton(ctrl, text='Outgoing', variable=self.var_out, command=self.apply_filters).pack(side='left', padx=5)
+        ttk.Checkbutton(ctrl, text='Listening', variable=self.var_lis, command=self.apply_filters).pack(side='left', padx=5)
+        ttk.Checkbutton(ctrl, text='ONLY EXTERNAL', variable=self.var_ext, command=self.apply_filters).pack(side='left', padx=10)
+        stats_frame = ttk.LabelFrame(main, text='Statistics', padding=10)
+        stats_frame.grid(row=1, column=0, sticky='ew', pady=(0, 10))
+        self.stats_var = tk.StringVar(value='No data')
+        ttk.Label(stats_frame, textvariable=self.stats_var, font=('', 10)).pack()
         admin_frame = ttk.Frame(main)
-        admin_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        
+        admin_frame.grid(row=2, column=0, sticky='ew', pady=(0, 10))
         self.admin_status_var = tk.StringVar()
-        self.admin_label = ttk.Label(
-            admin_frame, 
-            textvariable=self.admin_status_var,
-            font=("", 9, "bold")
-        )
-        self.admin_label.pack(side="left", padx=10)
-        
-        # Set admin status
+        self.admin_label = ttk.Label(admin_frame, textvariable=self.admin_status_var, font=('', 9, 'bold'))
+        self.admin_label.pack(side='left', padx=10)
         if is_admin():
-            self.admin_status_var.set("✓ Administrator Rights: Firewall blocking ACTIVE")
-            self.admin_label.config(foreground="green")
+            self.admin_status_var.set('✓ Administrator Rights: Firewall blocking ACTIVE')
+            self.admin_label.config(foreground='green')
         else:
-            self.admin_status_var.set("⚠️ NO Admin Rights: Firewall blocking DISABLED")
-            self.admin_label.config(foreground="red")
-        
-        # ====================
-        # NOTEBOOK (TABS)
-        # ====================
+            self.admin_status_var.set('⚠️ NO Admin Rights: Firewall blocking DISABLED')
+            self.admin_label.config(foreground='red')
         nb = ttk.Notebook(main)
-        nb.grid(row=3, column=0, sticky="nsew")
-        
-        # Bind tab change event
-        nb.bind("<<NotebookTabChanged>>", 
-               lambda e: self.save_selected_tab(nb.index(nb.select())))
-        
-        # ====================
-        # TAB 1: ACTIVE CONNECTIONS
-        # ====================
+        nb.grid(row=3, column=0, sticky='nsew')
+        nb.bind('<<NotebookTabChanged>>', lambda e: self.save_selected_tab(nb.index(nb.select())))
         f1 = ttk.Frame(nb, padding=10)
-        nb.add(f1, text="Active Connections")
-        
+        nb.add(f1, text='Active Connections')
         f1.columnconfigure(0, weight=1)
         f1.rowconfigure(0, weight=1)
-        
-        # TreeView columns
         cols = ('Dir', 'Process', 'PID', 'Local', 'Remote', 'Status')
-        self.tree = ttk.Treeview(f1, columns=cols, show="tree headings", selectmode="extended")
-        
-        # Configure TreeView
-        self.tree.heading("#0", text="Time")
-        self.tree.column("#0", width=90)
-        
-        for col in cols:
-            self.tree.heading(col, text=col)
-        
-        # Column widths
-        self.tree.column("Dir", width=80)
-        self.tree.column("Process", width=180)
-        self.tree.column("PID", width=70)
-        self.tree.column("Local", width=220)
-        self.tree.column("Remote", width=220)
-        self.tree.column("Status", width=120)
-        
-        # Scrollbar
-        vsb = ttk.Scrollbar(f1, orient="vertical", command=self.tree.yview)
+        self.tree = ttk.Treeview(f1, columns=cols, show='tree headings', selectmode='extended')
+        self.tree.heading('#0', text='Time')
+        self.tree.column('#0', width=90)
+        for c in cols:
+            self.tree.heading(c, text=c)
+        self.tree.column('Dir', width=80)
+        self.tree.column('Process', width=180)
+        self.tree.column('PID', width=70)
+        self.tree.column('Local', width=220)
+        self.tree.column('Remote', width=220)
+        self.tree.column('Status', width=120)
+        vsb = ttk.Scrollbar(f1, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
-        
-        # Layout
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        
-        # Event bindings
-        self.tree.bind("<Button-3>", self.show_context_menu)
-        self.tree.bind("<Double-1>", self.show_connection_details)
-        
-        # Color coding
-        self.tree.tag_configure("incoming", background="#ffcccc")   # Light red
-        self.tree.tag_configure("outgoing", background="#ccffcc")   # Light green
-        self.tree.tag_configure("listening", background="#ffffcc")  # Light yellow
-        
-        # ====================
-        # TAB 2: EVENT LOG
-        # ====================
+        self.tree.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        self.tree.bind('<Button-3>', self.show_context_menu)
+        self.tree.bind('<Double-1>', self.show_connection_details)
+        self.tree.tag_configure('incoming', background='#ffcccc')
+        self.tree.tag_configure('outgoing', background='#ccffcc')
+        self.tree.tag_configure('listening', background='#ffffcc')
         f2 = ttk.Frame(nb, padding=10)
-        nb.add(f2, text="Event Log")
-        
+        nb.add(f2, text='Event Log')
         f2.columnconfigure(0, weight=1)
         f2.rowconfigure(0, weight=1)
-        
-        self.log = scrolledtext.ScrolledText(
-            f2, 
-            state="disabled", 
-            font=("Consolas", 9)
-        )
-        self.log.grid(row=0, column=0, sticky="nsew")
-        
-        # ====================
-        # TAB 3: HISTORY
-        # ====================
+        self.log = scrolledtext.ScrolledText(f2, state='disabled', font=('Consolas', 9))
+        self.log.grid(row=0, column=0, sticky='nsew')
         f3 = ttk.Frame(nb, padding=10)
-        nb.add(f3, text="History")
-        
+        nb.add(f3, text='History')
         f3.columnconfigure(0, weight=1)
         f3.rowconfigure(0, weight=1)
-        
-        hist_cols = ("Time", "Direction", "Process", "Connection", "Status")
-        self.hist_tree = ttk.Treeview(f3, columns=hist_cols, show="headings", selectmode="extended")
-        
-        for col in hist_cols:
-            self.hist_tree.heading(col, text=col)
-        
-        # History column widths
-        self.hist_tree.column("Time", width=150)
-        self.hist_tree.column("Direction", width=90)
-        self.hist_tree.column("Process", width=180)
-        self.hist_tree.column("Connection", width=400)
-        self.hist_tree.column("Status", width=100)
-        
-        # History scrollbar
+        hist_cols = ('Time', 'Direction', 'Process', 'Connection', 'Status')
+        self.hist_tree = ttk.Treeview(f3, columns=hist_cols, show='headings', selectmode='extended')
+        for c in hist_cols:
+            self.hist_tree.heading(c, text=c)
+        self.hist_tree.column('Time', width=150)
+        self.hist_tree.column('Direction', width=90)
+        self.hist_tree.column('Process', width=180)
+        self.hist_tree.column('Connection', width=400)
+        self.hist_tree.column('Status', width=100)
         vsb2 = ttk.Scrollbar(f3, command=self.hist_tree.yview)
         self.hist_tree.configure(yscrollcommand=vsb2.set)
-        
-        self.hist_tree.grid(row=0, column=0, sticky="nsew")
-        vsb2.grid(row=0, column=1, sticky="ns")
-        
-        # ====================
-        # TAB 4: IP BLOCKING
-        # ====================
+        self.hist_tree.grid(row=0, column=0, sticky='nsew')
+        vsb2.grid(row=0, column=1, sticky='ns')
         f4 = ttk.Frame(nb, padding=10)
-        nb.add(f4, text="IP Blocking")
-        
+        nb.add(f4, text='IP Blocking')
         f4.columnconfigure(0, weight=1)
         f4.columnconfigure(1, weight=1)
-        
         row = 0
-        
-        # Blocklist Frame
-        bl_frame = ttk.LabelFrame(f4, text="Blocklist", padding=8)
-        bl_frame.grid(row=row, column=0, sticky="nsew", padx=5, pady=5)
-        
-        ttk.Button(bl_frame, text="Show Blocked IPs", 
-                  command=self.show_blocked_ips, width=20).pack(pady=3)
-        
-        ttk.Button(bl_frame, text="Update Blocklists", 
-                  command=self.update_blocklists, width=20).pack(pady=3)
-        
-        # Microsoft Frame
-        ms_frame = ttk.LabelFrame(f4, text="Microsoft", padding=8)
-        ms_frame.grid(row=row, column=1, sticky="nsew", padx=5, pady=5)
-        
-        ttk.Button(ms_frame, text="Block Microsoft", 
-                  command=self.block_microsoft_complete, width=20).pack(pady=3)
-        
-        ttk.Button(ms_frame, text="Hosts File Block", 
-                  command=self.block_microsoft_hosts, width=20).pack(pady=3)
-        
-        ttk.Button(ms_frame, text="Restore Hosts", 
-                  command=self.restore_hosts_backup, width=20).pack(pady=3)
-        
+        bl_frame = ttk.LabelFrame(f4, text='Blocklist', padding=8)
+        bl_frame.grid(row=row, column=0, sticky='nsew', padx=5, pady=5)
+        ttk.Button(bl_frame, text='Show Blocked IPs', command=self.show_blocked_ips, width=20).pack(pady=3)
+        ttk.Button(bl_frame, text='Update Blocklists', command=self.update_blocklists, width=20).pack(pady=3)
+        ms_frame = ttk.LabelFrame(f4, text='Microsoft', padding=8)
+        ms_frame.grid(row=row, column=1, sticky='nsew', padx=5, pady=5)
+        ttk.Button(ms_frame, text='Block Microsoft', command=self.block_microsoft_complete, width=20).pack(pady=3)
+        ttk.Button(ms_frame, text='Hosts File Block', command=self.block_microsoft_hosts, width=20).pack(pady=3)
+        ttk.Button(ms_frame, text='Restore Hosts', command=self.restore_hosts_backup, width=20).pack(pady=3)
         row += 1
-        
-        # Firewall Frame
-        fw_frame = ttk.LabelFrame(f4, text="Firewall", padding=8)
-        fw_frame.grid(row=row, column=0, sticky="nsew", padx=5, pady=5)
-        
-        ttk.Button(fw_frame, text="Block Pending IPs", 
-                  command=self.apply_pending_firewall_rules, width=20).pack(pady=3)
-        
-        # DNS over HTTPS Frame
-        doh_frame = ttk.LabelFrame(f4, text="DNS over HTTPS", padding=8)
-        doh_frame.grid(row=row, column=1, sticky="nsew", padx=5, pady=5)
-        
-        ttk.Button(doh_frame, text="Disable DoH", 
-                  command=self.disable_doh, width=20).pack(pady=3)
-        
-        ttk.Button(doh_frame, text="Enable DoH", 
-                  command=self.enable_doh, width=20).pack(pady=3)
-        
+        fw_frame = ttk.LabelFrame(f4, text='Firewall', padding=8)
+        fw_frame.grid(row=row, column=0, sticky='nsew', padx=5, pady=5)
+        ttk.Button(fw_frame, text='Block Pending IPs', command=self.apply_pending_firewall_rules, width=20).pack(pady=3)
+        doh_frame = ttk.LabelFrame(f4, text='DNS over HTTPS', padding=8)
+        doh_frame.grid(row=row, column=1, sticky='nsew', padx=5, pady=5)
+        ttk.Button(doh_frame, text='Disable DoH', command=self.disable_doh, width=20).pack(pady=3)
+        ttk.Button(doh_frame, text='Enable DoH', command=self.enable_doh, width=20).pack(pady=3)
         row += 1
-        
-        # Delivery Optimization Frame
-        do_frame = ttk.LabelFrame(f4, text="Delivery Optimization", padding=8)
-        do_frame.grid(row=row, column=0, sticky="nsew", padx=5, pady=5)
-        
-        ttk.Button(do_frame, text="Disable", 
-                  command=self.disable_delivery_optimization, width=20).pack(pady=3)
-        
-        ttk.Button(do_frame, text="Enable", 
-                  command=self.enable_delivery_optimization, width=20).pack(pady=3)
-        
-        # NCSI Control Frame
-        ncsi_frame = ttk.LabelFrame(f4, text="NCSI Control", padding=8)
-        ncsi_frame.grid(row=row, column=1, sticky="nsew", padx=5, pady=5)
-        
-        ttk.Button(ncsi_frame, text="Disable NCSI", 
-                  command=self.disable_ncsi, width=20).pack(pady=3)
-        
-        ttk.Button(ncsi_frame, text="Enable NCSI", 
-                  command=self.enable_ncsi, width=20).pack(pady=3)
-        
-        ttk.Button(ncsi_frame, text="Test Status", 
-                  command=self.test_ncsi_status, width=20).pack(pady=3)
-        
+        do_frame = ttk.LabelFrame(f4, text='Delivery Optimization', padding=8)
+        do_frame.grid(row=row, column=0, sticky='nsew', padx=5, pady=5)
+        ttk.Button(do_frame, text='Disable', command=self.disable_delivery_optimization, width=20).pack(pady=3)
+        ttk.Button(do_frame, text='Enable', command=self.enable_delivery_optimization, width=20).pack(pady=3)
+        ncsi_frame = ttk.LabelFrame(f4, text='NCSI Control', padding=8)
+        ncsi_frame.grid(row=row, column=1, sticky='nsew', padx=5, pady=5)
+        ttk.Button(ncsi_frame, text='Disable NCSI', command=self.disable_ncsi, width=20).pack(pady=3)
+        ttk.Button(ncsi_frame, text='Enable NCSI', command=self.enable_ncsi, width=20).pack(pady=3)
+        ttk.Button(ncsi_frame, text='Test Status', command=self.test_ncsi_status, width=20).pack(pady=3)
         row += 1
-        
-        # Privacy Frame (span 2 columns)
-        privacy_frame = ttk.LabelFrame(f4, text="One-Click Privacy", padding=8)
-        privacy_frame.grid(row=row, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
-        
-        ttk.Button(privacy_frame, text="Activate Full Privacy Mode", 
-                  command=self.full_privacy_mode, width=30).pack(side="left", padx=5, pady=3)
-        
-        ttk.Button(privacy_frame, text="Undo Privacy Mode", 
-                  command=self.undo_full_privacy_mode, width=30).pack(side="left", padx=5, pady=3)
-        
+        privacy_frame = ttk.LabelFrame(f4, text='One-Click Privacy', padding=8)
+        privacy_frame.grid(row=row, column=0, columnspan=2, sticky='nsew', padx=5, pady=5)
+        ttk.Button(privacy_frame, text='Activate Full Privacy Mode', command=self.full_privacy_mode, width=30).pack(side='left', padx=5, pady=3)
+        ttk.Button(privacy_frame, text='Undo Privacy Mode', command=self.undo_full_privacy_mode, width=30).pack(side='left', padx=5, pady=3)
         row += 1
-        
-        # Nuclear Options Frame (span 2 columns)
-        nuc_frame = ttk.LabelFrame(f4, text="⚠️ Emergency Options", padding=8)
-        nuc_frame.grid(row=row, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
-        
-        ttk.Button(nuc_frame, text="NUCLEAR - Block All Internet", 
-                  command=self.nuclear_option, width=30).pack(side="left", padx=5, pady=3)
-        
-        ttk.Button(nuc_frame, text="UNDO Nuclear Option", 
-                  command=self.undo_nuclear_option, width=30).pack(side="left", padx=5, pady=3)
-        
-        # ====================
-        # TAB 5: SETTINGS
-        # ====================
+        nuc_frame = ttk.LabelFrame(f4, text='⚠️ Emergency Options', padding=8)
+        nuc_frame.grid(row=row, column=0, columnspan=2, sticky='nsew', padx=5, pady=5)
+        ttk.Button(nuc_frame, text='NUCLEAR - Block All Internet', command=self.nuclear_option, width=30).pack(side='left', padx=5, pady=3)
+        ttk.Button(nuc_frame, text='UNDO Nuclear Option', command=self.undo_nuclear_option, width=30).pack(side='left', padx=5, pady=3)
         f5 = ttk.Frame(nb, padding=10)
-        nb.add(f5, text="Settings")
-        
+        nb.add(f5, text='Settings')
         f5.columnconfigure(0, weight=1)
-        
-        # Canvas with scrollbar for settings
         settings_canvas = tk.Canvas(f5)
-        settings_scrollbar = ttk.Scrollbar(f5, orient="vertical", command=settings_canvas.yview)
+        settings_scrollbar = ttk.Scrollbar(f5, orient='vertical', command=settings_canvas.yview)
         settings_frame = ttk.Frame(settings_canvas)
-        
-        # Configure canvas scrolling
-        settings_frame.bind(
-            "<Configure>",
-            lambda e: settings_canvas.configure(scrollregion=settings_canvas.bbox("all"))
-        )
-        
-        settings_canvas.create_window((0, 0), window=settings_frame, anchor="nw")
+        settings_frame.bind('<Configure>', lambda e: settings_canvas.configure(scrollregion=settings_canvas.bbox('all')))
+        settings_canvas.create_window((0, 0), window=settings_frame, anchor='nw')
         settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
-        
-        settings_canvas.pack(side="left", fill="both", expand=True)
-        settings_scrollbar.pack(side="right", fill="y")
-        
-        # ====================
-        # SETTINGS SECTIONS
-        # ====================
-        
-        # Version Information
-        version_frame = ttk.LabelFrame(settings_frame, text="Version Information", padding=10)
-        version_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10), padx=5)
-        
-        ttk.Label(version_frame, text=f"Version: {Config.CURRENT_VERSION}", 
-                 font=("", 9, "bold")).pack(pady=2)
-        
-        ttk.Label(version_frame, text="© 2025 Privacy Focused Development Team", 
-                 font=("", 7)).pack(pady=1)
-        
-        ttk.Button(version_frame, text="Check for Updates",
-                  command=self.check_for_updates, width=20).pack(pady=5)
-        
-        # Startup Settings
-        startup_frame = ttk.LabelFrame(settings_frame, text="Startup Settings", padding=10)
-        startup_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10), padx=5)
-        
-        # Autostart checkbox
+        settings_canvas.pack(side='left', fill='both', expand=True)
+        settings_scrollbar.pack(side='right', fill='y')
+        version_frame = ttk.LabelFrame(settings_frame, text='Version Information', padding=10)
+        version_frame.grid(row=0, column=0, sticky='ew', pady=(0, 10), padx=5)
+        ttk.Label(version_frame, text=f'Version: {Config.CURRENT_VERSION}', font=('', 9, 'bold')).pack(pady=2)
+        ttk.Label(version_frame, text='© 2025 Privacy Focused Development Team', font=('', 7)).pack(pady=1)
+        ttk.Button(version_frame, text='Check for Updates', command=self.check_for_updates, width=20).pack(pady=5)
+        startup_frame = ttk.LabelFrame(settings_frame, text='Startup Settings', padding=10)
+        startup_frame.grid(row=1, column=0, sticky='ew', pady=(0, 10), padx=5)
         self.autostart_var = tk.BooleanVar(value=self.settings.get('autostart_all_users', False))
-        ttk.Checkbutton(
-            startup_frame, 
-            text="Start with Windows (admin)",
-            variable=self.autostart_var,
-            command=self.toggle_autostart
-        ).pack(anchor="w", pady=2)
-        
-        # Start minimized checkbox
+        ttk.Checkbutton(startup_frame, text='Start with Windows (admin)', variable=self.autostart_var, command=self.toggle_autostart).pack(anchor='w', pady=2)
         self.start_minimized_var = tk.BooleanVar(value=self.settings.get('start_minimized', False))
-        ttk.Checkbutton(
-            startup_frame,
-            text="Start minimized",
-            variable=self.start_minimized_var,
-            command=lambda: self.settings.set('start_minimized', self.start_minimized_var.get())
-        ).pack(anchor="w", pady=2)
-        
-        # Minimize to tray checkbox
+        ttk.Checkbutton(startup_frame, text='Start minimized', variable=self.start_minimized_var, command=lambda: self.settings.set('start_minimized', self.start_minimized_var.get())).pack(anchor='w', pady=2)
         self.start_to_tray_var = tk.BooleanVar(value=self.settings.get('start_to_tray', False))
-        ttk.Checkbutton(
-            startup_frame,
-            text="Minimize to tray",
-            variable=self.start_to_tray_var,
-            command=lambda: self.settings.set('start_to_tray', self.start_to_tray_var.get())
-        ).pack(anchor="w", pady=2)
-        
-        # Auto-start monitoring checkbox
+        ttk.Checkbutton(startup_frame, text='Minimize to tray', variable=self.start_to_tray_var, command=lambda: self.settings.set('start_to_tray', self.start_to_tray_var.get())).pack(anchor='w', pady=2)
         self.start_monitoring_var = tk.BooleanVar(value=self.settings.get('start_monitoring_on_start', True))
-        ttk.Checkbutton(
-            startup_frame,
-            text="Auto-start monitoring",
-            variable=self.start_monitoring_var,
-            command=lambda: self.settings.set('start_monitoring_on_start', self.start_monitoring_var.get())
-        ).pack(anchor="w", pady=2)
-        
-        # Autostart status label
+        ttk.Checkbutton(startup_frame, text='Auto-start monitoring', variable=self.start_monitoring_var, command=lambda: self.settings.set('start_monitoring_on_start', self.start_monitoring_var.get())).pack(anchor='w', pady=2)
         hklm_status, hkcu_status = self.settings.check_autostart_status()
-        status_text = f"Status: {'Enabled' if hklm_status or hkcu_status else 'Disabled'}"
-        
+        status_text = f"Status: {('Enabled' if hklm_status or hkcu_status else 'Disabled')}"
         if hklm_status and hkcu_status:
-            status_text += " (HKLM + HKCU)"
+            status_text += ' (HKLM + HKCU)'
         elif hklm_status:
-            status_text += " (HKLM - All users)"
+            status_text += ' (HKLM - All users)'
         elif hkcu_status:
-            status_text += " (HKCU - Current user only)"
-        
-        self.autostart_status_label = ttk.Label(startup_frame, text=status_text, font=("", 8))
-        self.autostart_status_label.pack(anchor="w", pady=2)
-        
-        # Update Settings
-        update_frame = ttk.LabelFrame(settings_frame, text="Update Settings", padding=10)
-        update_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10), padx=5)
-        
+            status_text += ' (HKCU - Current user only)'
+        self.autostart_status_label = ttk.Label(startup_frame, text=status_text, font=('', 8))
+        self.autostart_status_label.pack(anchor='w', pady=2)
+        update_frame = ttk.LabelFrame(settings_frame, text='Update Settings', padding=10)
+        update_frame.grid(row=2, column=0, sticky='ew', pady=(0, 10), padx=5)
         self.check_updates_var = tk.BooleanVar(value=self.settings.get('check_updates_on_start', True))
-        ttk.Checkbutton(
-            update_frame,
-            text="Check updates on start",
-            variable=self.check_updates_var,
-            command=lambda: self.settings.set('check_updates_on_start', self.check_updates_var.get())
-        ).pack(anchor="w", pady=2)
-        
+        ttk.Checkbutton(update_frame, text='Check updates on start', variable=self.check_updates_var, command=lambda: self.settings.set('check_updates_on_start', self.check_updates_var.get())).pack(anchor='w', pady=2)
         self.auto_update_blocklists_var = tk.BooleanVar(value=self.settings.get('auto_update_blocklists', True))
-        ttk.Checkbutton(
-            update_frame,
-            text="Auto-update blocklists",
-            variable=self.auto_update_blocklists_var,
-            command=lambda: self.settings.set('auto_update_blocklists', self.auto_update_blocklists_var.get())
-        ).pack(anchor="w", pady=2)
-        
-        # Application Settings
-        app_frame = ttk.LabelFrame(settings_frame, text="Application Settings", padding=10)
-        app_frame.grid(row=3, column=0, sticky="ew", pady=(0, 10), padx=5)
-        
+        ttk.Checkbutton(update_frame, text='Auto-update blocklists', variable=self.auto_update_blocklists_var, command=lambda: self.settings.set('auto_update_blocklists', self.auto_update_blocklists_var.get())).pack(anchor='w', pady=2)
+        app_frame = ttk.LabelFrame(settings_frame, text='Application Settings', padding=10)
+        app_frame.grid(row=3, column=0, sticky='ew', pady=(0, 10), padx=5)
         self.show_notifications_var = tk.BooleanVar(value=self.settings.get('show_notifications', True))
-        ttk.Checkbutton(
-            app_frame,
-            text="Show notifications",
-            variable=self.show_notifications_var,
-            command=lambda: self.settings.set('show_notifications', self.show_notifications_var.get())
-        ).pack(anchor="w", pady=2)
-        
-        # Theme and Language frame
+        ttk.Checkbutton(app_frame, text='Show notifications', variable=self.show_notifications_var, command=lambda: self.settings.set('show_notifications', self.show_notifications_var.get())).pack(anchor='w', pady=2)
         theme_lang_frame = ttk.Frame(app_frame)
-        theme_lang_frame.pack(fill="x", pady=5)
-        
-        # Theme selector
-        ttk.Label(theme_lang_frame, text="Theme:", font=("", 8)).pack(side="left", padx=(0, 5))
-        
+        theme_lang_frame.pack(fill='x', pady=5)
+        ttk.Label(theme_lang_frame, text='Theme:', font=('', 8)).pack(side='left', padx=(0, 5))
         self.theme_var = tk.StringVar(value=self.settings.get('theme', 'default'))
-        theme_combo = ttk.Combobox(
-            theme_lang_frame,
-            textvariable=self.theme_var,
-            values=['default', 'light', 'dark', 'blue'],
-            state='readonly',
-            width=12
-        )
-        theme_combo.pack(side="left", padx=(0, 10))
-        theme_combo.bind('<<ComboboxSelected>>', 
-                        lambda e: self.settings.set('theme', self.theme_var.get()))
-        
-        # Language selector
-        ttk.Label(theme_lang_frame, text="Language:", font=("", 8)).pack(side="left", padx=(0, 5))
-        
+        theme_combo = ttk.Combobox(theme_lang_frame, textvariable=self.theme_var, values=['default', 'light', 'dark', 'blue'], state='readonly', width=12)
+        theme_combo.pack(side='left', padx=(0, 10))
+        theme_combo.bind('<<ComboboxSelected>>', lambda e: self.settings.set('theme', self.theme_var.get()))
+        ttk.Label(theme_lang_frame, text='Language:', font=('', 8)).pack(side='left', padx=(0, 5))
         self.language_var = tk.StringVar(value=self.settings.get('language', 'english'))
-        lang_combo = ttk.Combobox(
-            theme_lang_frame,
-            textvariable=self.language_var,
-            values=['english', 'german', 'french', 'spanish'],
-            state='readonly',
-            width=12
-        )
-        lang_combo.pack(side="left")
-        lang_combo.bind('<<ComboboxSelected>>', 
-                       lambda e: self.settings.set('language', self.language_var.get()))
-        
-        # Reset settings button
-        ttk.Button(
-            app_frame,
-            text="Reset All Settings",
-            command=self.reset_settings
-        ).pack(pady=5)
-        
-        # ====================
-        # FINAL INITIALIZATION
-        # ====================
-        
-        # Restore selected tab if saved
+        lang_combo = ttk.Combobox(theme_lang_frame, textvariable=self.language_var, values=['english', 'german', 'french', 'spanish'], state='readonly', width=12)
+        lang_combo.pack(side='left')
+        lang_combo.bind('<<ComboboxSelected>>', lambda e: self.settings.set('language', self.language_var.get()))
+        ttk.Button(app_frame, text='Reset All Settings', command=self.reset_settings).pack(pady=5)
         selected_tab = self.settings.get('selected_tab', 0)
         nb.select(selected_tab)
-        
-        # Status bar
-        self.status_var = tk.StringVar(value="Ready")
-        status = ttk.Label(main, textvariable=self.status_var, relief="sunken", anchor="w", padding=5)
-        status.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        self.status_var = tk.StringVar(value='Ready')
+        status = ttk.Label(main, textvariable=self.status_var, relief='sunken', anchor='w', padding=5)
+        status.grid(row=4, column=0, sticky='ew', pady=(10, 0))
 
     def save_selected_tab(self, tab_index):
         """Save the currently selected tab index"""
@@ -1085,6 +854,125 @@ class WinDetoxGUI:
         except Exception as e:
             self.logger.debug(f'Context menu error: {e}')
 
+    def apply_pending_firewall_rules(self):
+        """Apply all new IPs at once with detailed progress window"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Administrator rights are required to apply firewall rules.\nPlease restart the application as administrator.')
+            return
+        blocklist = self.network_service.blocklist
+        new_ips = [ip for ip in blocklist.blocked_ips if ip not in blocklist._firewall_applied_ips]
+        if not new_ips:
+            messagebox.showinfo('Nothing to do', 'All IPs are already blocked in firewall.')
+            return
+        win = tk.Toplevel(self.root)
+        win.title(f'Applying Firewall Rules for {len(new_ips)} IPs')
+        win.geometry('700x450')
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        title_label = ttk.Label(win, text='🛡️ Applying Windows Firewall Rules', font=('', 14, 'bold'))
+        title_label.pack(pady=15)
+        info_label = ttk.Label(win, text=f'Applying firewall rules for {len(new_ips)} blocked IPs', font=('', 10))
+        info_label.pack(pady=5)
+        progress_frame = ttk.Frame(win)
+        progress_frame.pack(pady=10, padx=20, fill='x')
+        progress_label = ttk.Label(progress_frame, text='Progress:', font=('', 10))
+        progress_label.pack(anchor='w')
+        progress = ttk.Progressbar(progress_frame, length=600, mode='determinate')
+        progress.pack(fill='x', pady=(5, 0))
+        status_var = tk.StringVar(value='Initializing firewall operations...')
+        status_label = ttk.Label(win, textvariable=status_var, font=('', 10, 'bold'), wraplength=650)
+        status_label.pack(pady=10)
+        stats_frame = ttk.Frame(win)
+        stats_frame.pack(pady=10, padx=20, fill='x')
+        stats_vars = {'success': tk.StringVar(value='Success: 0'), 'failed': tk.StringVar(value='Failed: 0'), 'total': tk.StringVar(value=f'Total: {len(new_ips)}'), 'current_ip': tk.StringVar(value='Current: -')}
+        ttk.Label(stats_frame, textvariable=stats_vars['success'], foreground='green').pack(side='left', padx=10)
+        ttk.Label(stats_frame, textvariable=stats_vars['failed'], foreground='red').pack(side='left', padx=10)
+        ttk.Label(stats_frame, textvariable=stats_vars['total']).pack(side='left', padx=10)
+        ttk.Label(stats_frame, textvariable=stats_vars['current_ip'], font=('', 9, 'italic')).pack(side='right', padx=10)
+        details_frame = ttk.LabelFrame(win, text='Operation Details', padding=10)
+        details_frame.pack(pady=15, padx=20, fill='both', expand=True)
+        details_text = scrolledtext.ScrolledText(details_frame, height=10, width=80, state='disabled', font=('Consolas', 9))
+        details_text.pack(fill='both', expand=True)
+
+        def log_detail(message):
+            """Add message to details log"""
+            details_text.config(state='normal')
+            details_text.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
+            details_text.see(tk.END)
+            details_text.config(state='disabled')
+            win.update_idletasks()
+        failed_ips = []
+
+        def update_progress(current, total, text):
+            """Update progress and status"""
+            progress_percent = current / total * 100 if total > 0 else 100
+            progress['value'] = progress_percent
+            status_var.set(text)
+            success_count = current - len(failed_ips) if current >= len(failed_ips) else 0
+            stats_vars['success'].set(f'Success: {success_count}')
+            stats_vars['failed'].set(f'Failed: {len(failed_ips)}')
+            if current > 0 and current <= total:
+                log_detail(text)
+            if current > 0 and current <= len(new_ips):
+                stats_vars['current_ip'].set(f'Current: {new_ips[current - 1]}')
+            win.update_idletasks()
+
+        def run_firewall_application():
+            """Run firewall rule application"""
+            nonlocal failed_ips
+            try:
+                log_detail(f'Starting firewall rule application for {len(new_ips)} IPs')
+                log_detail('=' * 60)
+                success_count = self.network_service.firewall.apply_firewall_rules_bulk(new_ips, add=True, progress_callback=update_progress)
+                for ip in new_ips:
+                    if ip not in failed_ips:
+                        self.network_service.blocklist._firewall_applied_ips.add(ip)
+                self.network_service.blocklist.save_blocklist()
+                log_detail('=' * 60)
+                log_detail(f'✅ Firewall rule application completed!')
+
+                def show_results():
+                    win.destroy()
+                    if failed_ips:
+                        result_msg = f'Firewall rules applied with partial success:\n\n✅ Successfully applied: {success_count} IPs\n❌ Failed: {len(failed_ips)} IPs\n\n'
+                        if len(failed_ips) <= 10:
+                            result_msg += 'Failed IPs:\n' + '\n'.join(failed_ips[:10])
+                        else:
+                            result_msg += f'First 10 failed IPs:\n' + '\n'.join(failed_ips[:10])
+                            result_msg += f'\n... and {len(failed_ips) - 10} more'
+                        messagebox.showwarning('Partial Success', result_msg)
+                    else:
+                        messagebox.showinfo('Success', f'✅ Firewall rules successfully applied for all {success_count} IPs!\n\nAll blocked IPs are now actively filtered by Windows Firewall.')
+                    self.log_append(f'✅ Firewall rules applied for {success_count} IPs\n')
+                    self.status_var.set(f'Firewall active - {success_count} IPs blocked')
+                win.after(100, show_results)
+            except PermissionError as e:
+
+                def show_permission_error():
+                    win.destroy()
+                    messagebox.showerror('Permission Error', f'Cannot apply firewall rules:\n\n{str(e)}\n\nPlease run as Administrator!')
+                win.after(0, show_permission_error)
+            except Exception as e:
+
+                def show_error():
+                    win.destroy()
+                    messagebox.showerror('Error', f'Failed to apply firewall rules:\n\n{str(e)[:200]}')
+                win.after(0, show_error)
+        threading.Thread(target=run_firewall_application, daemon=True).start()
+
+        def cancel_operation():
+            if messagebox.askyesno('Cancel', 'Firewall rule application is in progress.\n\nCancelling may leave firewall in inconsistent state.\nContinue anyway?'):
+                win.destroy()
+                messagebox.showinfo('Cancelled', 'Firewall rule application cancelled.\nSome rules may have been applied.')
+        cancel_button = ttk.Button(win, text='Cancel', command=cancel_operation)
+        cancel_button.pack(pady=10)
+
+        def on_closing():
+            if messagebox.askyesno('Close Window', 'Firewall rules are being applied.\n\nClosing now may interrupt the process and leave\nfirewall in inconsistent state.\n\nClose anyway?'):
+                win.destroy()
+        win.protocol('WM_DELETE_WINDOW', on_closing)
+
     def update_blocklists(self):
         """Start blocklist update in separate thread"""
 
@@ -1199,6 +1087,782 @@ class WinDetoxGUI:
             self.logger.error(f'Periodic update failed: {e}')
         finally:
             self.root.after(3600000, self._periodic_update)
+
+    def disable_ncsi(self):
+        """Disable Windows NCSI (Network Connectivity Status Indicator) - WITH CONFIRMATION"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Disabling NCSI requires admin rights!\nPlease restart the application as administrator.')
+            return
+        if messagebox.askyesno('⚠️ COMPLETELY DISABLE NCSI', "🚫 ABSOLUTE NCSI-KILL - WINDOWS INTERNET DETECTION WILL BE COMPLETELY DISABLED!\n\nTHIS MEANS:\n• Windows will NEVER show 'No Internet connection'\n• Taskbar network icon always shows as connected\n• Apps can still access internet (if not blocked)\n• No Windows-specific network checks anymore\n\n⚠️ IMPORTANT: This only affects Windows internet detection!\n           Your real internet connection remains unchanged.\n\nThis action:\n1. Sets registry entries\n2. Blocks NCSI domains in hosts file\n3. Adds firewall rules\n4. Disables NLA Service\n5. Sets network signatures to 'Private'\n\nContinue?"):
+            win = tk.Toplevel(self.root)
+            win.title('🚫 COMPLETELY DISABLING NCSI...')
+            win.geometry('600x250')
+            win.transient(self.root)
+            win.grab_set()
+            ttk.Label(win, text='🚫 COMPLETELY DISABLING NCSI...', font=('', 12, 'bold'), foreground='red').pack(pady=15)
+            ttk.Label(win, text='Windows internet detection will be permanently disabled', font=('', 9)).pack(pady=5)
+            progress = ttk.Progressbar(win, length=500, mode='determinate')
+            progress.pack(pady=15, padx=20)
+            status = tk.StringVar(value='Starting NCSI kill...')
+            ttk.Label(win, textvariable=status, font=('', 9)).pack(pady=5)
+            details = scrolledtext.ScrolledText(win, height=6, width=70, state='disabled')
+            details.pack(pady=10, padx=20)
+
+            def update_progress(text, detail=''):
+                status.set(text)
+                if detail:
+                    details.config(state='normal')
+                    details.insert(tk.END, f'• {detail}\n')
+                    details.see(tk.END)
+                    details.config(state='disabled')
+                win.update_idletasks()
+
+            def run_ncsi_kill():
+                try:
+                    update_progress('Disabling registry entries...', 'Registry: EnableActiveProbing = 0')
+                    success = self.network_service.blocklist.disable_ncsi()
+                    if success:
+                        update_progress('✅ NCSI COMPLETELY DISABLED!', "Windows will never show 'No Internet connection'")
+                        summary = '\n    ✅ NCSI COMPLETELY DISABLED!\n\n    What this means for you:\n    ────────────────────────\n    ✓ Windows will NEVER show "No Internet connection"\n    ✓ Taskbar network icon always shows "Connected"\n    ✓ No Windows-internal internet checks\n    ✓ Your real internet connection remains intact\n\n    What was changed:\n    ───────────────────\n    • Registry: EnableActiveProbing = 0\n    • Network Signature set to "Private"\n    • NCSI domains blocked in hosts file\n    • Firewall rules for NCSI servers\n    • NLA Service disabled\n\n    ⚠️ IMPORTANT: This only affects Windows!\n              Your actual internet access continues to work.\n              If you really have no internet, Windows won\'t show it anymore.\n    '
+                        win.after(0, win.destroy)
+                        messagebox.showinfo('✅ NCSI COMPLETELY DISABLED!', summary)
+                        self.log_append('🚫 NCSI COMPLETELY DISABLED - Windows internet detection killed\n')
+                        self.status_var.set('NCSI disabled - No Windows internet detection')
+                    else:
+                        update_progress('❌ Error disabling NCSI')
+                        win.after(0, win.destroy)
+                        messagebox.showerror('Error', 'Failed to disable NCSI.\nCheck admin rights!')
+                except Exception as e:
+                    update_progress(f'❌ Error: {str(e)}')
+                    win.after(0, win.destroy)
+                    messagebox.showerror('Error', f'Unknown error: {str(e)}')
+            threading.Thread(target=run_ncsi_kill, daemon=True).start()
+
+    def enable_ncsi(self):
+        """Enable Windows NCSI (Network Connectivity Status Indicator) - WITH CONFIRMATION"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Enabling NCSI requires admin rights!\nPlease restart the application as administrator.')
+            return
+        if messagebox.askyesno('✅ RESTORE NCSI', "🔄 RESTORE WINDOWS INTERNET DETECTION\n\nTHIS MEANS:\n• Windows can check internet connectivity again\n• 'No Internet connection' will be shown again\n• Normal Windows network behavior\n\nThis action undoes ALL NCSI changes:\n1. Resets registry entries\n2. Removes NCSI blocks from hosts file\n3. Deletes firewall rules\n4. Re-enables NLA Service\n5. Resets network signatures\n\nContinue?"):
+            win = tk.Toplevel(self.root)
+            win.title('✅ RESTORING NCSI...')
+            win.geometry('600x250')
+            win.transient(self.root)
+            win.grab_set()
+            ttk.Label(win, text='✅ RESTORING NCSI...', font=('', 12, 'bold'), foreground='green').pack(pady=15)
+            ttk.Label(win, text='Windows internet detection will be re-enabled', font=('', 9)).pack(pady=5)
+            progress = ttk.Progressbar(win, length=500, mode='determinate')
+            progress.pack(pady=15, padx=20)
+            status = tk.StringVar(value='Starting NCSI restoration...')
+            ttk.Label(win, textvariable=status, font=('', 9)).pack(pady=5)
+            details = scrolledtext.ScrolledText(win, height=6, width=70, state='disabled')
+            details.pack(pady=10, padx=20)
+
+            def update_progress(text, detail=''):
+                status.set(text)
+                if detail:
+                    details.config(state='normal')
+                    details.insert(tk.END, f'• {detail}\n')
+                    details.see(tk.END)
+                    details.config(state='disabled')
+                win.update_idletasks()
+
+            def run_ncsi_enable():
+                try:
+                    update_progress('Enabling registry entries...', 'Registry: EnableActiveProbing = 1')
+                    success = self.network_service.blocklist.enable_ncsi()
+                    if success:
+                        update_progress('✅ NCSI RESTORED!', 'Windows can check internet connectivity')
+                        update_progress('Testing NCSI connectivity...', 'Checking connection to NCSI servers')
+                        time.sleep(2)
+                        summary = "\n    ✅ NCSI RESTORED!\n\n    What this means for you:\n    ────────────────────────\n    ✓ Windows checks internet connectivity again\n    ✓ 'No Internet connection' will be shown correctly\n    ✓ Normal Windows network behavior\n    ✓ All NCSI blocks removed\n\n    What was reset:\n    ───────────────────────\n    • Registry: EnableActiveProbing = 1\n    • Network Signature reset\n    • NCSI blocks removed from hosts file\n    • Firewall rules for NCSI deleted\n    • NLA Service re-enabled\n\n    ✅ Windows internet detection is active again!\n    "
+                        win.after(0, win.destroy)
+                        messagebox.showinfo('✅ NCSI RESTORED!', summary)
+                        self.log_append('✅ NCSI restored - Windows internet detection active\n')
+                        self.status_var.set('NCSI active - Windows internet detection active')
+                    else:
+                        update_progress('❌ Error restoring NCSI')
+                        win.after(0, win.destroy)
+                        messagebox.showerror('Error', 'Failed to restore NCSI.\nCheck admin rights!')
+                except Exception as e:
+                    update_progress(f'❌ Error: {str(e)}')
+                    win.after(0, win.destroy)
+                    messagebox.showerror('Error', f'Unknown error: {str(e)}')
+            threading.Thread(target=run_ncsi_enable, daemon=True).start()
+
+    def test_ncsi_status(self):
+        """Test current NCSI status - ENHANCED VERSION"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Testing NCSI requires admin rights!\nPlease restart the application as administrator.')
+            return
+        win = tk.Toplevel(self.root)
+        win.title('🔍 NCSI STATUS TEST - ENHANCED')
+        win.geometry('700x500')
+        win.transient(self.root)
+        win.grab_set()
+        ttk.Label(win, text='🔍 NCSI STATUS TEST - ENHANCED', font=('', 12, 'bold')).pack(pady=15)
+        progress = ttk.Progressbar(win, mode='indeterminate')
+        progress.pack(pady=10, padx=50, fill='x')
+        progress.start()
+        status_text = tk.StringVar(value='Starting enhanced NCSI test...')
+        status_label = ttk.Label(win, textvariable=status_text)
+        status_label.pack(pady=5)
+        result_text = scrolledtext.ScrolledText(win, height=25, width=80, state='disabled')
+        result_text.pack(pady=10, padx=20, fill='both', expand=True)
+
+        def run_test():
+            try:
+                results = self.network_service.blocklist.test_ncsi_status()
+
+                def display_results():
+                    progress.stop()
+                    progress.pack_forget()
+                    result_text.config(state='normal')
+                    result_text.delete(1.0, tk.END)
+                    if 'error' in results:
+                        result_text.insert(tk.END, f"❌ Test error: {results['error']}")
+                        return
+                    result_text.insert(tk.END, '🔍 NCSI STATUS REPORT - ENHANCED\n')
+                    result_text.insert(tk.END, '=' * 60 + '\n\n')
+                    result_text.insert(tk.END, f"OVERALL STATUS: {results.get('overall_status', 'Unknown')}\n")
+                    result_text.insert(tk.END, f"Connectivity Score: {results.get('connectivity_score', '?/3')}\n\n")
+                    result_text.insert(tk.END, '=' * 60 + '\n')
+                    result_text.insert(tk.END, 'REGISTRY ENTRIES:\n\n')
+                    reg_value = results.get('registry_value', '?')
+                    reg_status = '✅ ACTIVE' if results.get('registry_enabled') else '🚫 BLOCKED'
+                    result_text.insert(tk.END, f'• EnableActiveProbing: {reg_status} (Value: {reg_value})\n')
+                    unmanaged_val = results.get('unmanaged_first_network', 'Not set')
+                    unmanaged_blocked = '🚫 BLOCKED' if results.get('unmanaged_blocked') else '✅ OK'
+                    result_text.insert(tk.END, f"• Unmanaged/FirstNetwork: {unmanaged_blocked} (Value: '{unmanaged_val}')\n")
+                    managed_val = results.get('managed_first_network', 'Not set')
+                    managed_blocked = '🚫 BLOCKED' if results.get('managed_blocked') else '✅ OK'
+                    result_text.insert(tk.END, f"• Managed/FirstNetwork: {managed_blocked} (Value: '{managed_val}')\n\n")
+                    result_text.insert(tk.END, '=' * 60 + '\n')
+                    result_text.insert(tk.END, 'SERVICES:\n\n')
+                    if results.get('nla_service_running'):
+                        result_text.insert(tk.END, '✅ NLA Service: Running (State: 4=RUNNING)\n')
+                    else:
+                        result_text.insert(tk.END, f"🚫 NLA Service: Not running (State: {results.get('nla_service_state', '?')})\n")
+                    if results.get('firewall_block_http'):
+                        result_text.insert(tk.END, '🚫 NCSI Firewall Rules: ACTIVE (blocked)\n')
+                    else:
+                        result_text.insert(tk.END, '✅ NCSI Firewall Rules: No blocks\n\n')
+                    result_text.insert(tk.END, '=' * 60 + '\n')
+                    result_text.insert(tk.END, 'CONNECTIVITY TESTS:\n\n')
+                    test_urls = [url for url in Config.NCSI_TEST_URLS if url in results]
+                    success_count = sum((1 for url in test_urls if results[url]))
+                    for url in test_urls:
+                        if results[url]:
+                            content = results.get(f'{url}_content', 'No content')
+                            result_text.insert(tk.END, f'✅ {url}\n')
+                            result_text.insert(tk.END, f"   Content: '{content[:50]}...'\n")
+                        else:
+                            error = results.get(f'{url}_error', 'Timeout/Error')
+                            result_text.insert(tk.END, f'🚫 {url}\n')
+                            result_text.insert(tk.END, f'   Error: {error}\n')
+                    result_text.insert(tk.END, '\n' + '=' * 60 + '\n')
+                    result_text.insert(tk.END, 'INTERPRETATION:\n\n')
+                    if success_count >= 2 and results.get('registry_enabled'):
+                        result_text.insert(tk.END, '✅ NCSI FULLY FUNCTIONAL\n')
+                        result_text.insert(tk.END, 'Windows can correctly detect internet connection.\n')
+                    elif success_count == 0 and (not results.get('registry_enabled')):
+                        result_text.insert(tk.END, '🚫 NCSI COMPLETELY BLOCKED\n')
+                        result_text.insert(tk.END, "Windows will NEVER show 'No Internet connection'.\n")
+                        result_text.insert(tk.END, 'Taskbar icon always shows as connected.\n')
+                    else:
+                        result_text.insert(tk.END, '⚠️ NCSI PARTIALLY BLOCKED\n')
+                        result_text.insert(tk.END, 'Windows internet detection is limited.\n')
+                    result_text.insert(tk.END, '\n' + '=' * 60 + '\n')
+                    result_text.insert(tk.END, 'RECOMMENDATIONS:\n\n')
+                    if success_count >= 2:
+                        result_text.insert(tk.END, '• Everything OK - NCSI works as Windows expects\n')
+                    else:
+                        result_text.insert(tk.END, "• If you want Windows internet detection: 'Enable NCSI'\n")
+                        result_text.insert(tk.END, "• If you NEVER want to see 'No Internet': 'Disable NCSI'\n")
+                    result_text.config(state='disabled')
+                    status_text.set('Test completed')
+                win.after(0, display_results)
+            except Exception as e:
+                win.after(0, lambda: messagebox.showerror('Test Error', f'NCSI test error: {str(e)}'))
+                win.after(0, win.destroy)
+        threading.Thread(target=run_test, daemon=True).start()
+
+    def nuclear_option(self):
+        """Completely block all outgoing traffic (except loopback and DNS)"""
+        if not messagebox.askyesno('NUCLEAR OPTION', 'WARNING: This blocks ALL outgoing traffic!\nOnly loopback (127.0.0.1) and DNS (port 53) will work.\nInternet is completely dead - for testing or emergencies only.\n\nReally activate?', icon='warning'):
+            return
+        if not is_admin():
+            messagebox.showerror('Admin Rights Required', 'Nuclear option requires administrator rights!\nPlease restart the application as administrator.')
+            return
+        win = tk.Toplevel(self.root)
+        win.title('Activating Nuclear Option...')
+        win.geometry('500x180')
+        win.transient(self.root)
+        win.grab_set()
+        ttk.Label(win, text='Activating nuclear option...', font=('', 11, 'bold')).pack(pady=20)
+        progress = ttk.Progressbar(win, length=400, mode='determinate')
+        progress.pack(pady=10)
+        status = tk.StringVar(value='Starting nuclear option...')
+        ttk.Label(win, textvariable=status).pack(pady=5)
+
+        def run_nuclear():
+            try:
+                success = self.network_service.firewall.apply_nuclear_firewall_rule(add=True, allow_dns=True)
+                win.after(0, lambda: self._finalize_nuclear(success, win))
+            except PermissionError as e:
+                win.after(0, lambda: messagebox.showerror('Permission Error', str(e)))
+                win.after(0, win.destroy)
+            except Exception as e:
+                win.after(0, lambda: messagebox.showerror('Error', f'Failed: {str(e)}'))
+                win.after(0, win.destroy)
+        threading.Thread(target=run_nuclear, daemon=True).start()
+
+    def _finalize_nuclear(self, success: bool, window):
+        """Finalize nuclear option activation"""
+        if success:
+            messagebox.showinfo('Nuclear Option Active', '✅ Nuclear option activated!\n\nAll internet traffic is now blocked.\nOnly local (127.0.0.1) communication and DNS (UDP port 53) work.\nDoT/DoH (TCP 853) is also blocked to prevent bypass.')
+            self.log_append('⚠️ NUCLEAR OPTION ACTIVATED - All internet blocked\n')
+            self.status_var.set('NUCLEAR ACTIVE - Internet blocked')
+        else:
+            messagebox.showerror('Nuclear Option Failed', 'Failed to activate nuclear option.\n\nPlease check:\n1. Administrator rights\n2. Windows Firewall service\n3. Antivirus interference')
+            self.log_append('❌ Nuclear option failed\n')
+        window.destroy()
+
+    def undo_nuclear_option(self):
+        """Undo the nuclear option - restore internet access"""
+        if not messagebox.askyesno('UNDO NUCLEAR OPTION', 'This will remove all nuclear option firewall rules and restore internet access.\n\n⚠️ This action requires Administrator rights.\n\nContinue?', icon='warning'):
+            return
+        if not is_admin():
+            messagebox.showerror('Admin Rights Required', 'Cannot undo nuclear option without Administrator rights!\nPlease restart the application as administrator.')
+            return
+        win = tk.Toplevel(self.root)
+        win.title('Restoring Internet Access...')
+        win.geometry('500x180')
+        win.transient(self.root)
+        win.grab_set()
+        ttk.Label(win, text='Removing nuclear firewall rules...', font=('', 11, 'bold')).pack(pady=20)
+        progress = ttk.Progressbar(win, length=400, mode='determinate')
+        progress.pack(pady=10)
+        status = tk.StringVar(value='Starting removal...')
+        ttk.Label(win, textvariable=status).pack(pady=5)
+
+        def run_undo():
+            try:
+                success = self.network_service.firewall.apply_nuclear_firewall_rule(add=False)
+                self.network_service.firewall.remove_all_nuclear_rules()
+                win.after(0, lambda: self._finalize_undo(success, win))
+            except PermissionError as e:
+                win.after(0, lambda: messagebox.showerror('Permission Error', str(e)))
+                win.after(0, win.destroy)
+            except Exception as e:
+                win.after(0, lambda: messagebox.showerror('Error', f'Failed: {str(e)}'))
+                win.after(0, win.destroy)
+        threading.Thread(target=run_undo, daemon=True).start()
+
+    def _finalize_undo(self, success: bool, window):
+        """Finalize nuclear option undo"""
+        if success:
+            messagebox.showinfo('Nuclear Option Undone', '✅ Internet access has been restored!\n\nAll nuclear option firewall rules have been removed.\nYou should now have normal network connectivity.')
+            self.log_append('✅ Nuclear option undone - Internet restored\n')
+            self.status_var.set('Nuclear option undone - Internet restored')
+        else:
+            messagebox.showerror('Undo Failed', "Failed to remove all nuclear option rules.\n\nYou may need to:\n1. Run as Administrator\n2. Manually check Windows Firewall rules\n3. Look for rules named 'WinDetox_Nuclear_*' or 'WinDetox_Allow_Loopback'")
+            self.log_append('❌ Failed to undo nuclear option\n')
+        window.destroy()
+
+    def disable_doh(self):
+        """Disable Windows DNS over HTTPS"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Administrator rights are required to disable DoH.\nPlease restart the application as administrator.')
+            return
+        if messagebox.askyesno('Disable DoH', 'This will disable Windows DNS over HTTPS.\nThis may improve privacy but could affect some websites.\n\nContinue?'):
+            try:
+                if self.network_service.blocklist.disable_windows_doh():
+                    messagebox.showinfo('Success', 'Windows DoH has been disabled (including 25H2 support).')
+                    self.log_append('Windows DoH disabled\n')
+                else:
+                    messagebox.showerror('Error', 'Failed to disable DoH.')
+            except PermissionError as e:
+                messagebox.showerror('Permission Error', str(e))
+            except Exception as e:
+                messagebox.showerror('Error', f'Failed to disable DoH: {e}')
+
+    def enable_doh(self):
+        """Enable Windows DNS over HTTPS"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Administrator rights are required to enable DoH.\nPlease restart the application as administrator.')
+            return
+        if messagebox.askyesno('Enable DoH', 'This will enable Windows DNS over HTTPS.\nThis may improve security but could affect monitoring.\n\nContinue?'):
+            try:
+                if self.network_service.blocklist.enable_windows_doh():
+                    messagebox.showinfo('Success', 'Windows DoH has been enabled.')
+                    self.log_append('Windows DoH enabled\n')
+                else:
+                    messagebox.showerror('Error', 'Failed to enable DoH.')
+            except PermissionError as e:
+                messagebox.showerror('Permission Error', str(e))
+            except Exception as e:
+                messagebox.showerror('Error', f'Failed to enable DoH: {e}')
+
+    def disable_delivery_optimization(self):
+        """Disable Windows Delivery Optimization"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Administrator rights are required to disable Delivery Optimization.\nPlease restart the application as administrator.')
+            return
+        if messagebox.askyesno('Disable Delivery Optimization', 'This will disable Windows Delivery Optimization via registry.\nThis prevents Windows Update from using other PCs in the LAN.\n\nContinue?'):
+            try:
+                if self.network_service.blocklist.disable_delivery_optimization():
+                    messagebox.showinfo('Success', 'Delivery Optimization has been disabled.')
+                    self.log_append('Delivery Optimization disabled\n')
+                else:
+                    messagebox.showerror('Error', 'Failed to disable Delivery Optimization.')
+            except PermissionError as e:
+                messagebox.showerror('Permission Error', str(e))
+            except Exception as e:
+                messagebox.showerror('Error', f'Failed to disable Delivery Optimization: {e}')
+
+    def enable_delivery_optimization(self):
+        """Enable Windows Delivery Optimization"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Administrator rights are required to enable Delivery Optimization.\nPlease restart the application as administrator.')
+            return
+        if messagebox.askyesno('Enable Delivery Optimization', 'This will enable Windows Delivery Optimization.\nThis may improve update speeds but reduces privacy.\n\nContinue?'):
+            try:
+                if self.network_service.blocklist.enable_delivery_optimization():
+                    messagebox.showinfo('Success', 'Delivery Optimization has been enabled.')
+                    self.log_append('Delivery Optimization enabled\n')
+                else:
+                    messagebox.showerror('Error', 'Failed to enable Delivery Optimization.')
+            except PermissionError as e:
+                messagebox.showerror('Permission Error', str(e))
+            except Exception as e:
+                messagebox.showerror('Error', f'Failed to enable Delivery Optimization: {e}')
+
+    def block_microsoft_hosts(self):
+        """Block Microsoft domains via hosts file"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Administrator rights are required to modify the hosts file.\nPlease restart the application as administrator.')
+            return
+        if messagebox.askyesno('Block Microsoft via Hosts', 'This will add comprehensive Microsoft domain blocks to the hosts file.\nThis blocks telemetry and updates via domains.\n\nContinue?'):
+            try:
+                if self.network_service.blocklist.block_microsoft_in_hosts():
+                    messagebox.showinfo('Success', 'Microsoft domains have been added to the hosts file.')
+                    self.log_append('Microsoft domains added to hosts file\n')
+                else:
+                    messagebox.showerror('Error', 'Failed to update hosts file.')
+            except PermissionError as e:
+                messagebox.showerror('Permission Error', str(e))
+            except BlocklistError as e:
+                messagebox.showerror('Error', str(e))
+            except Exception as e:
+                messagebox.showerror('Error', f'Failed to update hosts file: {e}')
+
+    def restore_hosts_backup(self):
+        """Restore hosts file from backup"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Administrator rights are required to restore hosts file.\nPlease restart the application as administrator.')
+            return
+        if messagebox.askyesno('Restore Hosts Backup', 'This will restore the hosts file from the latest backup.\n\nContinue?'):
+            try:
+                if self.network_service.blocklist.restore_hosts_file():
+                    messagebox.showinfo('Success', 'Hosts file has been restored from backup.')
+                    self.log_append('Hosts file restored from backup\n')
+                else:
+                    messagebox.showerror('Error', 'Failed to restore hosts file.')
+            except PermissionError as e:
+                messagebox.showerror('Permission Error', str(e))
+            except BlocklistError as e:
+                messagebox.showerror('Error', str(e))
+            except Exception as e:
+                messagebox.showerror('Error', f'Failed to restore hosts file: {e}')
+
+    def full_privacy_mode(self):
+        """Activate full privacy mode (one-click) with proper progress feedback"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Full privacy mode requires administrator rights!\nPlease restart the application as administrator.')
+            return
+        if not messagebox.askyesno('Full Privacy Mode', "🚫 COMPLETELY DE-SPY WINDOWS + KILL NCSI\n\nThis will:\n1. Block Microsoft telemetry IPs\n2. Block Microsoft domains via hosts file\n3. Disable Windows DoH\n4. Disable Delivery Optimization\n5. Stop Microsoft tracking services\n6. Disable NCSI (no more 'No Internet' messages!)\n\nWindows will then be as private as Linux Mint!\n⚠️ Without NCSI, no Windows internet detection!\n\nContinue?"):
+            return
+        win = tk.Toplevel(self.root)
+        win.title('Activating Complete Privacy Mode...')
+        win.geometry('600x400')
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        title_label = ttk.Label(win, text='🛡️ Activating Complete Privacy Mode', font=('', 14, 'bold'))
+        title_label.pack(pady=15)
+        progress_frame = ttk.Frame(win)
+        progress_frame.pack(pady=10, padx=20, fill='x')
+        progress_label = ttk.Label(progress_frame, text='Progress:', font=('', 10))
+        progress_label.pack(anchor='w')
+        progress = ttk.Progressbar(progress_frame, length=500, mode='determinate')
+        progress.pack(fill='x', pady=(5, 0))
+        status_var = tk.StringVar(value='Initializing...')
+        status_label = ttk.Label(win, textvariable=status_var, font=('', 10, 'bold'), wraplength=550)
+        status_label.pack(pady=10)
+        details_frame = ttk.LabelFrame(win, text='Details', padding=10)
+        details_frame.pack(pady=15, padx=20, fill='both', expand=True)
+        details_text = scrolledtext.ScrolledText(details_frame, height=12, width=70, state='disabled', font=('Consolas', 9))
+        details_text.pack(fill='both', expand=True)
+
+        def log_detail(message):
+            """Add message to details log"""
+            details_text.config(state='normal')
+            details_text.insert(tk.END, f'• {message}\n')
+            details_text.see(tk.END)
+            details_text.config(state='disabled')
+            win.update_idletasks()
+
+        def update_status(message, value=None):
+            """Update status and progress"""
+            status_var.set(message)
+            if value is not None:
+                progress['value'] = value
+            log_detail(message)
+            win.update_idletasks()
+        results = {'steps_completed': 0, 'total_steps': 7, 'errors': []}
+
+        def run_privacy_mode():
+            """Execute all privacy mode steps"""
+            try:
+                update_status('Updating Microsoft blocklists...', 16)
+                try:
+                    added = self.network_service.blocklist._update_microsoft_list()
+                    update_status(f'✓ Added {added} Microsoft IPs to blocklist', 16)
+                    log_detail(f'Blocked {added} new Microsoft telemetry IPs')
+                    results['steps_completed'] += 1
+                except Exception as e:
+                    error_msg = f'Failed to update blocklists: {str(e)[:100]}'
+                    update_status(f'⚠️ {error_msg}', 16)
+                    log_detail(f'ERROR: {str(e)}')
+                    results['errors'].append(error_msg)
+                update_status('Applying firewall rules for blocked IPs...', 28)
+                try:
+                    blocklist = self.network_service.blocklist
+                    new_ips = [ip for ip in blocklist.blocked_ips if ip not in blocklist._firewall_applied_ips]
+                    if new_ips:
+                        update_status(f'Applying firewall rules for {len(new_ips)} IPs...', 28)
+
+                        def firewall_progress(current, total, text):
+                            progress_percent = 28 + current / total * 14 if total > 0 else 42
+                            win.after(0, lambda: update_status(f'Firewall: {current}/{total} IPs - {text}', progress_percent))
+                        blocked_count = self.network_service.firewall.apply_firewall_rules_bulk(new_ips, add=True, progress_callback=firewall_progress)
+                        for ip in new_ips:
+                            self.network_service.blocklist._firewall_applied_ips.add(ip)
+                        update_status(f'✓ Firewall rules applied for {blocked_count} IPs', 42)
+                        log_detail(f'Applied firewall rules for {blocked_count}/{len(new_ips)} IPs')
+                    else:
+                        update_status('✓ No new firewall rules needed', 42)
+                        log_detail('All IPs already have firewall rules')
+                    results['steps_completed'] += 1
+                except Exception as e:
+                    error_msg = f'Failed to apply firewall rules: {str(e)[:100]}'
+                    update_status(f'⚠️ {error_msg}', 42)
+                    log_detail(f'ERROR: {str(e)}')
+                    results['errors'].append(error_msg)
+                update_status('Blocking Microsoft domains via hosts file...', 56)
+                try:
+                    if self.network_service.blocklist.block_microsoft_in_hosts():
+                        update_status('✓ Microsoft domains blocked in hosts file', 56)
+                        log_detail('Added comprehensive Microsoft domain blocks to hosts file')
+                    else:
+                        update_status('⚠️ Hosts file modification may have failed', 56)
+                        log_detail('Hosts file modification returned False')
+                    results['steps_completed'] += 1
+                except Exception as e:
+                    error_msg = f'Failed to modify hosts file: {str(e)[:100]}'
+                    update_status(f'⚠️ {error_msg}', 56)
+                    log_detail(f'ERROR: {str(e)}')
+                    results['errors'].append(error_msg)
+                update_status('Disabling Windows DNS over HTTPS (DoH)...', 70)
+                try:
+                    if self.network_service.blocklist.disable_windows_doh():
+                        update_status('✓ Windows DoH disabled', 70)
+                        log_detail('Disabled DNS over HTTPS (including Windows 11 24H2+/25H2)')
+                    else:
+                        update_status('⚠️ DoH disable may have failed', 70)
+                        log_detail('DoH disable returned False')
+                    results['steps_completed'] += 1
+                except Exception as e:
+                    error_msg = f'Failed to disable DoH: {str(e)[:100]}'
+                    update_status(f'⚠️ {error_msg}', 70)
+                    log_detail(f'ERROR: {str(e)}')
+                    results['errors'].append(error_msg)
+                update_status('Disabling Delivery Optimization...', 84)
+                try:
+                    if self.network_service.blocklist.disable_delivery_optimization():
+                        update_status('✓ Delivery Optimization disabled', 84)
+                        log_detail('Disabled Windows Update peer-to-peer sharing')
+                    else:
+                        update_status('⚠️ Delivery Optimization disable may have failed', 84)
+                        log_detail('Delivery Optimization disable returned False')
+                    results['steps_completed'] += 1
+                except Exception as e:
+                    error_msg = f'Failed to disable Delivery Optimization: {str(e)[:100]}'
+                    update_status(f'⚠️ {error_msg}', 84)
+                    log_detail(f'ERROR: {str(e)}')
+                    results['errors'].append(error_msg)
+                update_status('Stopping Microsoft tracking services...', 92)
+                try:
+                    success = self.network_service.blocklist.disable_microsoft_services()
+                    update_status('✓ Microsoft telemetry services stopped', 92)
+                    log_detail('Disabled Microsoft tracking and telemetry services')
+                    results['steps_completed'] += 1
+                except Exception as e:
+                    error_msg = f'Failed to stop services: {str(e)[:100]}'
+                    update_status(f'⚠️ {error_msg}', 92)
+                    log_detail(f'ERROR: {str(e)}')
+                    results['errors'].append(error_msg)
+                update_status('Disabling NCSI (Windows internet detection)...', 95)
+                try:
+                    if self.network_service.blocklist.disable_ncsi():
+                        update_status('✓ NCSI completely disabled!', 100)
+                        log_detail('Windows internet detection completely disabled')
+                        log_detail("Windows will never show 'No Internet connection'")
+                    else:
+                        update_status('⚠️ NCSI disable may have failed', 100)
+                        log_detail('NCSI disable returned False')
+                    results['steps_completed'] += 1
+                except Exception as e:
+                    error_msg = f'Failed to disable NCSI: {str(e)[:100]}'
+                    update_status(f'⚠️ {error_msg}', 100)
+                    log_detail(f'ERROR: {str(e)}')
+                    results['errors'].append(error_msg)
+                self.network_service.blocklist.save_blocklist()
+
+                def show_results():
+                    win.destroy()
+                    summary = f"✅ Privacy Mode Activation Complete!\n\nSteps completed: {results['steps_completed']}/{results['total_steps']}\nTotal blocked IPs: {len(self.network_service.blocklist.blocked_ips)}\n"
+                    if results['errors']:
+                        summary += f"\n⚠️ {len(results['errors'])} warnings:\n"
+                        for i, error in enumerate(results['errors'][:3], 1):
+                            summary += f'{i}. {error}\n'
+                        if len(results['errors']) > 3:
+                            summary += f"... and {len(results['errors']) - 3} more\n"
+                    summary += f"\n🔒 Your Windows is now de-spied!\n• Microsoft telemetry blocked\n• NCSI disabled (no 'No Internet' messages)\n• Windows is now as private as Linux Mint!"
+                    messagebox.showinfo('Privacy Mode Complete', summary)
+                    self.log_append('✅ Full privacy mode activated\n')
+                    self.status_var.set(f"Privacy mode active - {results['steps_completed']}/{results['total_steps']} steps complete")
+                win.after(100, show_results)
+            except Exception as e:
+
+                def show_error():
+                    win.destroy()
+                    messagebox.showerror('Critical Error', f'Privacy mode failed with critical error:\n\n{str(e)[:200]}')
+                    self.log_append(f'❌ Privacy mode failed: {e}\n')
+                win.after(0, show_error)
+        threading.Thread(target=run_privacy_mode, daemon=True).start()
+
+    def undo_full_privacy_mode(self):
+        """Undo full privacy mode - COMPLETE UNDO including NCSI and firewall rules"""
+        if not is_admin():
+            messagebox.showwarning('Admin Rights Required', 'Undoing privacy mode requires administrator rights!\nPlease restart the application as administrator.')
+            return
+        if not messagebox.askyesno('Undo Full Privacy Mode', '🔄 COMPLETE UNDO - RESTORE ALL CHANGES\n\nThis will undo EVERYTHING:\n1. Restore hosts file\n2. Enable Windows DoH\n3. Enable Delivery Optimization\n4. Re-enable Microsoft services\n5. Enable NCSI (Windows internet detection)\n6. Remove ALL firewall rules for blocked IPs\n7. Remove ALL NCSI firewall rules\n8. Keep blocked IPs in blocklist (optional to clear)\n\nContinue?'):
+            return
+        win = tk.Toplevel(self.root)
+        win.title('Undoing Complete Privacy Mode...')
+        win.geometry('600x450')
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        title_label = ttk.Label(win, text='🔄 Undoing Complete Privacy Mode', font=('', 14, 'bold'))
+        title_label.pack(pady=15)
+        info_label = ttk.Label(win, text='Reverting all privacy mode changes...', font=('', 10))
+        info_label.pack(pady=5)
+        progress_frame = ttk.Frame(win)
+        progress_frame.pack(pady=10, padx=20, fill='x')
+        progress_label = ttk.Label(progress_frame, text='Progress:', font=('', 10))
+        progress_label.pack(anchor='w')
+        progress = ttk.Progressbar(progress_frame, length=500, mode='determinate')
+        progress.pack(fill='x', pady=(5, 0))
+        status_var = tk.StringVar(value='Initializing undo operations...')
+        status_label = ttk.Label(win, textvariable=status_var, font=('', 10, 'bold'), wraplength=550)
+        status_label.pack(pady=10)
+        stats_frame = ttk.Frame(win)
+        stats_frame.pack(pady=10, padx=20, fill='x')
+        stats_vars = {'completed': tk.StringVar(value='Completed: 0/8'), 'current': tk.StringVar(value='Current: -')}
+        ttk.Label(stats_frame, textvariable=stats_vars['completed']).pack(side='left', padx=10)
+        ttk.Label(stats_frame, textvariable=stats_vars['current'], font=('', 9, 'italic')).pack(side='right', padx=10)
+        details_frame = ttk.LabelFrame(win, text='Operation Details', padding=10)
+        details_frame.pack(pady=15, padx=20, fill='both', expand=True)
+        details_text = scrolledtext.ScrolledText(details_frame, height=10, width=70, state='disabled', font=('Consolas', 9))
+        details_text.pack(fill='both', expand=True)
+
+        def log_detail(message):
+            """Add message to details log"""
+            details_text.config(state='normal')
+            details_text.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
+            details_text.see(tk.END)
+            details_text.config(state='disabled')
+            win.update_idletasks()
+
+        def update_progress(step, total_steps, message, current_operation=''):
+            """Update progress and status"""
+            progress_percent = step / total_steps * 100 if total_steps > 0 else 100
+            progress['value'] = progress_percent
+            status_var.set(message)
+            stats_vars['completed'].set(f'Completed: {step}/{total_steps}')
+            stats_vars['current'].set(f'Current: {current_operation}')
+            log_detail(message)
+            win.update_idletasks()
+        results = {'steps_completed': 0, 'total_steps': 8, 'errors': [], 'firewall_rules_removed': 0, 'successful_ips_removed': []}
+
+        def run_complete_undo():
+            """Execute all undo operations"""
+            try:
+                update_progress(1, 8, 'Restoring hosts file from backup...', 'Hosts file')
+                try:
+                    if self.network_service.blocklist.restore_hosts_file():
+                        log_detail('✓ Hosts file restored from backup')
+                        results['steps_completed'] += 1
+                    else:
+                        error_msg = 'Failed to restore hosts file'
+                        log_detail(f'❌ {error_msg}')
+                        results['errors'].append(error_msg)
+                except Exception as e:
+                    error_msg = f'Hosts restore error: {str(e)[:100]}'
+                    log_detail(f'❌ {error_msg}')
+                    results['errors'].append(error_msg)
+                update_progress(2, 8, 'Enabling Windows DNS over HTTPS (DoH)...', 'DoH')
+                try:
+                    if self.network_service.blocklist.enable_windows_doh():
+                        log_detail('✓ Windows DoH enabled')
+                        results['steps_completed'] += 1
+                    else:
+                        error_msg = 'Failed to enable DoH'
+                        log_detail(f'❌ {error_msg}')
+                        results['errors'].append(error_msg)
+                except Exception as e:
+                    error_msg = f'DoH enable error: {str(e)[:100]}'
+                    log_detail(f'❌ {error_msg}')
+                    results['errors'].append(error_msg)
+                update_progress(3, 8, 'Enabling Delivery Optimization...', 'Delivery Optimization')
+                try:
+                    if self.network_service.blocklist.enable_delivery_optimization():
+                        log_detail('✓ Delivery Optimization enabled')
+                        results['steps_completed'] += 1
+                    else:
+                        error_msg = 'Failed to enable Delivery Optimization'
+                        log_detail(f'❌ {error_msg}')
+                        results['errors'].append(error_msg)
+                except Exception as e:
+                    error_msg = f'Delivery Optimization error: {str(e)[:100]}'
+                    log_detail(f'❌ {error_msg}')
+                    results['errors'].append(error_msg)
+                update_progress(4, 8, 'Enabling Microsoft tracking services...', 'Services')
+                try:
+                    if self.network_service.blocklist.enable_microsoft_services():
+                        log_detail('✓ Microsoft services enabled')
+                        results['steps_completed'] += 1
+                    else:
+                        error_msg = 'Failed to enable Microsoft services'
+                        log_detail(f'❌ {error_msg}')
+                        results['errors'].append(error_msg)
+                except Exception as e:
+                    error_msg = f'Services enable error: {str(e)[:100]}'
+                    log_detail(f'❌ {error_msg}')
+                    results['errors'].append(error_msg)
+                update_progress(5, 8, 'Enabling NCSI (Windows internet detection)...', 'NCSI')
+                try:
+                    if self.network_service.blocklist.enable_ncsi():
+                        log_detail('✓ NCSI enabled - Windows internet detection restored')
+                        log_detail('✓ ALL NCSI firewall rules removed')
+                        results['steps_completed'] += 1
+                    else:
+                        error_msg = 'Failed to enable NCSI'
+                        log_detail(f'❌ {error_msg}')
+                        results['errors'].append(error_msg)
+                except Exception as e:
+                    error_msg = f'NCSI enable error: {str(e)[:100]}'
+                    log_detail(f'❌ {error_msg}')
+                    results['errors'].append(error_msg)
+                update_progress(6, 8, 'Removing firewall rules for blocked IPs...', 'Firewall rules')
+                try:
+                    firewall_applied_ips = list(self.network_service.blocklist._firewall_applied_ips)
+                    if firewall_applied_ips:
+                        log_detail(f'Removing firewall rules for {len(firewall_applied_ips)} IPs...')
+
+                        def firewall_progress(current, total, text):
+                            progress_percent = 75 + current / total * 12 if total > 0 else 87
+                            win.after(0, lambda: update_progress(6, 8, f'Firewall: {current}/{total} IPs - {text}', 'Firewall rules'))
+                        removed_count, successful_ips = self.network_service.firewall.apply_firewall_rules_bulk(firewall_applied_ips, add=False, progress_callback=firewall_progress)
+                        results['firewall_rules_removed'] = removed_count
+                        results['successful_ips_removed'] = successful_ips
+                        for ip in successful_ips:
+                            self.network_service.blocklist._firewall_applied_ips.discard(ip)
+                        log_detail(f'✓ Removed firewall rules for {removed_count}/{len(firewall_applied_ips)} IPs')
+                        log_detail(f'✓ Updated firewall tracking for {len(successful_ips)} IPs')
+                    else:
+                        log_detail('✓ No firewall rules to remove')
+                        results['firewall_rules_removed'] = 0
+                    results['steps_completed'] += 1
+                except Exception as e:
+                    error_msg = f'Firewall removal error: {str(e)[:100]}'
+                    log_detail(f'❌ {error_msg}')
+                    results['errors'].append(error_msg)
+                update_progress(7, 8, 'Cleaning up remaining WinDetox firewall rules...', 'Cleanup')
+                try:
+                    cleanup_script = '\n                    # Remove any remaining WinDetox firewall rules\n                    $rules = Get-NetFirewallRule -DisplayName "*WinDetox*" -ErrorAction SilentlyContinue\n                    foreach ($rule in $rules) {\n                        Remove-NetFirewallRule -DisplayName $rule.DisplayName -Confirm:$false -ErrorAction SilentlyContinue\n                    }\n                    \n                    # Also remove via netsh\n                    netsh advfirewall firewall delete rule name="WinDetox_*" -ErrorAction SilentlyContinue 2>&1 | Out-Null\n                    Write-Output "Cleanup completed"\n                    '
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.ps1', delete=False, encoding='utf-8') as f:
+                        f.write(cleanup_script)
+                        temp_script = f.name
+                    result = safe_subprocess_run(['powershell', '-ExecutionPolicy', 'Bypass', '-File', temp_script], capture_output=True, text=True, timeout=30)
+                    os.remove(temp_script)
+                    if result.returncode == 0:
+                        log_detail('✓ Remaining WinDetox firewall rules cleaned up')
+                    else:
+                        log_detail('⚠️ Some cleanup operations may have failed')
+                    results['steps_completed'] += 1
+                except Exception as e:
+                    error_msg = f'Cleanup error: {str(e)[:100]}'
+                    log_detail(f'⚠️ {error_msg}')
+                    results['errors'].append(error_msg)
+                update_progress(8, 8, 'Saving blocklist configuration...', 'Save config')
+                try:
+                    self.network_service.blocklist.save_blocklist()
+                    log_detail('✓ Blocklist configuration saved')
+                    results['steps_completed'] += 1
+                except Exception as e:
+                    error_msg = f'Save error: {str(e)[:100]}'
+                    log_detail(f'❌ {error_msg}')
+                    results['errors'].append(error_msg)
+
+                def show_results():
+                    win.destroy()
+                    clear_blocklist = False
+                    if messagebox.askyesno('Clear Blocklist?', f"✅ Privacy mode completely undone!\n\nSteps completed: {results['steps_completed']}/8\nFirewall rules removed: {results['firewall_rules_removed']}\nIPs removed from firewall tracking: {len(results['successful_ips_removed'])}\n\nDo you also want to CLEAR the blocklist?\n(Remove all IPs from the blocked list)"):
+                        try:
+                            self.network_service.blocklist.blocked_ips.clear()
+                            self.network_service.blocklist.sources.clear()
+                            self.network_service.blocklist.save_blocklist()
+                            clear_blocklist = True
+                        except Exception as e:
+                            messagebox.showerror('Error', f'Failed to clear blocklist: {e}')
+                    summary = f"✅ COMPLETE UNDO FINISHED!\n\nSteps completed: {results['steps_completed']}/8\nFirewall rules removed: {results['firewall_rules_removed']}\nIPs removed from firewall tracking: {len(results['successful_ips_removed'])}\n"
+                    if clear_blocklist:
+                        summary += f'Blocklist: CLEARED (all IPs removed)\n'
+                    else:
+                        summary += f'Blocklist: KEPT (IPs remain in list but firewall rules removed)\n'
+                    if results['errors']:
+                        summary += f"\n⚠️ {len(results['errors'])} warnings:\n"
+                        for i, error in enumerate(results['errors'][:3], 1):
+                            summary += f'{i}. {error}\n'
+                        if len(results['errors']) > 3:
+                            summary += f"... and {len(results['errors']) - 3} more\n"
+                    summary += f'\n🔄 System restored to original state:\n• Hosts file restored\n• DoH enabled\n• Delivery Optimization enabled\n• Microsoft services running\n• NCSI active (Windows can detect internet)\n• ALL firewall rules removed (blocked IPs + NCSI)\n• Remaining WinDetox rules cleaned up\n'
+                    messagebox.showinfo('Complete Undo Finished', summary)
+                    self.log_append('✅ Complete privacy mode undone - ALL changes reverted\n')
+                    self.status_var.set('Privacy mode completely undone')
+                win.after(100, show_results)
+            except Exception as e:
+
+                def show_error():
+                    win.destroy()
+                    messagebox.showerror('Critical Error', f'Undo operation failed with critical error:\n\n{str(e)[:200]}')
+                    self.log_append(f'❌ Privacy mode undo failed: {e}\n')
+                win.after(0, show_error)
+        threading.Thread(target=run_complete_undo, daemon=True).start()
 
     def show_tray_notification(self, title: str, message: str):
         """Show notification from system tray"""
