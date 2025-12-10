@@ -105,8 +105,13 @@ class TurboDNSResolver:
         }
         
         # Quick analysis phase
-        if progress_callback:
-            progress_callback(0, total, "Phase 1: Quick IP analysis...")
+        if progress_callback and not self.cancelled.is_set():
+            try:
+                progress_callback(0, total, "Phase 1: Quick IP analysis...")
+            except:
+                # GUI might be closed
+                self.cancel()
+                return stats
         
         # Pre-analyze IPs for Microsoft/Cloud detection
         microsoft_count = 0
@@ -124,18 +129,33 @@ class TurboDNSResolver:
             elif is_cloud:
                 cloud_count += 1
             
-            if idx % 100 == 0 and progress_callback:
-                progress_callback(idx, total, f"Analyzing {idx}/{total} IPs...")
+            if idx % 100 == 0 and progress_callback and not self.cancelled.is_set():
+                try:
+                    progress_callback(idx, total, f"Analyzing {idx}/{total} IPs...")
+                except:
+                    # GUI might be closed
+                    self.cancel()
+                    return stats
         
         stats["microsoft"] = microsoft_count
         stats["cloud"] = cloud_count
         
-        if progress_callback:
-            progress_callback(total, total, f"Phase 1 complete: {microsoft_count} Microsoft, {cloud_count} Cloud IPs")
+        if progress_callback and not self.cancelled.is_set():
+            try:
+                progress_callback(total, total, f"Phase 1 complete: {microsoft_count} Microsoft, {cloud_count} Cloud IPs")
+            except:
+                # GUI might be closed
+                self.cancel()
+                return stats
         
         # DNS resolution phase
-        if progress_callback:
-            progress_callback(0, total, "Phase 2: Starting parallel DNS resolution...")
+        if progress_callback and not self.cancelled.is_set():
+            try:
+                progress_callback(0, total, "Phase 2: Starting parallel DNS resolution...")
+            except:
+                # GUI might be closed
+                self.cancel()
+                return stats
         
         # Save original timeout
         original_timeout = socket.getdefaulttimeout()
@@ -155,12 +175,17 @@ class TurboDNSResolver:
             if self.cancelled.is_set():
                 break
             
-            if progress_callback:
-                progress_callback(
-                    batch_num * batch_size, 
-                    total,
-                    f"Batch {batch_num+1}/{len(batches)}: Resolving {len(batch)} IPs..."
-                )
+            if progress_callback and not self.cancelled.is_set():
+                try:
+                    progress_callback(
+                        batch_num * batch_size, 
+                        total,
+                        f"Batch {batch_num+1}/{len(batches)}: Resolving {len(batch)} IPs..."
+                    )
+                except:
+                    # GUI might be closed
+                    self.cancel()
+                    break
             
             # Process batch in parallel
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -194,32 +219,35 @@ class TurboDNSResolver:
                         else:
                             stats["error"] += 1
                         
-                        # Update type counts (avoid double counting)
-                        if is_microsoft:
-                            # Already counted in quick analysis, but verify
-                            pass
-                        elif is_cloud:
-                            # Already counted in quick analysis, but verify
-                            pass
-                        
-                        # Call result callback
-                        if result_callback:
-                            result_callback(idx, ip, hostname, status, is_microsoft, is_cloud)
+                        # Call result callback (if GUI still exists)
+                        if result_callback and not self.cancelled.is_set():
+                            try:
+                                result_callback(idx, ip, hostname, status, is_microsoft, is_cloud)
+                            except:
+                                # GUI window closed, cancel operation
+                                self.cancel()
                         
                         # Update progress periodically
                         processed = stats["resolved"] + stats["timeout"] + stats["error"]
-                        if processed % 20 == 0 and progress_callback:
-                            progress_callback(
-                                batch_num * batch_size + idx_in_batch,
-                                total,
-                                f"Resolved: {stats['resolved']}, "
-                                f"Microsoft: {stats['microsoft']}, Cloud: {stats['cloud']}"
-                            )
-                            
+                        if processed % 20 == 0 and progress_callback and not self.cancelled.is_set():
+                            try:
+                                progress_callback(
+                                    batch_num * batch_size + idx_in_batch,
+                                    total,
+                                    f"Resolved: {stats['resolved']}, "
+                                    f"Microsoft: {stats['microsoft']}, Cloud: {stats['cloud']}"
+                                )
+                            except:
+                                # GUI might be closed
+                                self.cancel()
+                                
                     except concurrent.futures.TimeoutError:
                         stats["timeout"] += 1
-                        if result_callback:
-                            result_callback(idx, ip, "timeout", "timeout", False, False)
+                        if result_callback and not self.cancelled.is_set():
+                            try:
+                                result_callback(idx, ip, "timeout", "timeout", False, False)
+                            except:
+                                self.cancel()
                     except Exception as e:
                         if self.logger:
                             self.logger.debug(f"Future processing error: {e}")
@@ -230,13 +258,18 @@ class TurboDNSResolver:
             
             # Update progress after each batch
             processed = min((batch_num + 1) * batch_size, total)
-            if progress_callback:
-                progress_callback(
-                    processed, total,
-                    f"Batch {batch_num+1}/{len(batches)} complete. "
-                    f"Resolved: {stats['resolved']}/{processed}, "
-                    f"Microsoft: {stats['microsoft']}, Cloud: {stats['cloud']}"
-                )
+            if progress_callback and not self.cancelled.is_set():
+                try:
+                    progress_callback(
+                        processed, total,
+                        f"Batch {batch_num+1}/{len(batches)} complete. "
+                        f"Resolved: {stats['resolved']}/{processed}, "
+                        f"Microsoft: {stats['microsoft']}, Cloud: {stats['cloud']}"
+                    )
+                except:
+                    # GUI might be closed
+                    self.cancel()
+                    break
             
             # Small delay between batches
             if not self.cancelled.is_set() and batch_num < len(batches) - 1:
@@ -257,7 +290,10 @@ class TurboDNSResolver:
         # Cancel all active futures
         for future in self.active_futures:
             if not future.done():
-                future.cancel()
+                try:
+                    future.cancel()
+                except:
+                    pass
         
         if self.logger:
             self.logger.debug("DNS resolution cancelled")
