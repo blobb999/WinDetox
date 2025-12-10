@@ -1,1 +1,1 @@
-"""Package initialization"""
+"""GUI Package"""
