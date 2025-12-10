@@ -1,4 +1,4 @@
-"""
+﻿"""
 Blocked IPs Viewer - GUI window for displaying and managing blocked IPs
 """
 import tkinter as tk
@@ -52,6 +52,10 @@ class BlockedIPsViewer:
         self.progress = None
         self.status_var = None
         self.details_text = None
+        
+        # Thread control
+        self.resolution_thread = None
+        self.is_window_destroyed = threading.Event()
     
     def show(self):
         """Show the blocked IPs window"""
@@ -69,8 +73,12 @@ class BlockedIPsViewer:
         self._setup_gui()
         self._setup_events()
         
+        # Reset destroyed flag
+        self.is_window_destroyed.clear()
+        
         # Start DNS resolution in background
-        threading.Thread(target=self._start_resolution, daemon=True).start()
+        self.resolution_thread = threading.Thread(target=self._start_resolution, daemon=True)
+        self.resolution_thread.start()
     
     def _setup_gui(self):
         """Setup GUI components"""
@@ -196,7 +204,7 @@ class BlockedIPsViewer:
         ttk.Button(action_frame, text="Export to CSV", 
                   command=self._export_csv).pack(side="left", padx=5)
         ttk.Button(action_frame, text="Close", 
-                  command=self.window.destroy).pack(side="left", padx=5)
+                  command=self._safe_destroy).pack(side="left", padx=5)
         
         # Cancel button
         cancel_button = ttk.Button(self.window, text="Cancel Resolution", 
@@ -218,42 +226,85 @@ class BlockedIPsViewer:
     
     def _setup_events(self):
         """Setup window events"""
-        self.window.protocol("WM_DELETE_WINDOW", self._on_closing)
+        self.window.protocol("WM_DELETE_WINDOW", self._safe_destroy)
     
-    def _on_closing(self):
-        """Handle window closing"""
+    def _safe_destroy(self):
+        """Safely destroy window and stop all threads"""
+        # Mark window as destroyed
+        self.is_window_destroyed.set()
+        
+        # Cancel DNS resolution
         self.dns_resolver.cancel()
+        
+        # Wait a bit for thread to respond
+        if self.resolution_thread and self.resolution_thread.is_alive():
+            self.resolution_thread.join(timeout=1.0)
+        
+        # Destroy window
         self.window.destroy()
+    
+    def _safe_after(self, delay_ms: int, func: Callable, *args):
+        """Safely schedule a function with after(), checking if window exists"""
+        if not self.is_window_destroyed.is_set() and self.window:
+            try:
+                self.window.after(delay_ms, func, *args)
+            except:
+                # Window might be destroyed between check and after()
+                pass
     
     def _log_detail(self, message: str):
         """Add message to details log"""
-        self.details_text.config(state="normal")
-        self.details_text.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
-        self.details_text.see(tk.END)
-        self.details_text.config(state="disabled")
-        self.window.update_idletasks()
+        if self.is_window_destroyed.is_set() or not self.window:
+            return
+            
+        try:
+            self.details_text.config(state="normal")
+            self.details_text.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
+            self.details_text.see(tk.END)
+            self.details_text.config(state="disabled")
+            self.window.update_idletasks()
+        except:
+            # Window destroyed during update
+            self.is_window_destroyed.set()
     
     def _update_progress(self, current: int, total: int, text: str):
         """Update progress bar and status"""
-        progress_percent = (current / total) * 100 if total > 0 else 100
-        self.progress['value'] = progress_percent
-        self.status_var.set(text)
-        self.window.update_idletasks()
+        if self.is_window_destroyed.is_set() or not self.window:
+            return
+            
+        try:
+            progress_percent = (current / total) * 100 if total > 0 else 100
+            self.progress['value'] = progress_percent
+            self.status_var.set(text)
+            self.window.update_idletasks()
+        except:
+            # Window destroyed during update
+            self.is_window_destroyed.set()
     
     def _update_stats(self, resolved: int, timeout: int, error: int, 
                      microsoft: int, cloud: int, total: int):
         """Update statistics display"""
-        self.stats_vars["resolved"].set(f"Resolved: {resolved}")
-        self.stats_vars["timeout"].set(f"Timeout: {timeout}")
-        self.stats_vars["error"].set(f"Error: {error}")
-        self.stats_vars["microsoft"].set(f"Microsoft: {microsoft}")
-        self.stats_vars["cloud"].set(f"Cloud: {cloud}")
-        self.stats_vars["total"].set(f"Total: {total}")
-        self.window.update_idletasks()
+        if self.is_window_destroyed.is_set() or not self.window:
+            return
+            
+        try:
+            self.stats_vars["resolved"].set(f"Resolved: {resolved}")
+            self.stats_vars["timeout"].set(f"Timeout: {timeout}")
+            self.stats_vars["error"].set(f"Error: {error}")
+            self.stats_vars["microsoft"].set(f"Microsoft: {microsoft}")
+            self.stats_vars["cloud"].set(f"Cloud: {cloud}")
+            self.stats_vars["total"].set(f"Total: {total}")
+            self.window.update_idletasks()
+        except:
+            # Window destroyed during update
+            self.is_window_destroyed.set()
     
     def _update_tree_item(self, idx: int, ip: str, hostname: str, source: str, 
                          is_microsoft: bool, is_cloud: bool):
         """Update a single tree item (thread-safe)"""
+        if self.is_window_destroyed.is_set() or not self.window:
+            return
+            
         try:
             # Find item with the given ID
             for item in self.tree.get_children():
@@ -280,21 +331,30 @@ class BlockedIPsViewer:
         except Exception as e:
             if self.logger:
                 self.logger.debug(f"Failed to update tree item: {e}")
+            # Window likely destroyed
+            self.is_window_destroyed.set()
     
     def _start_resolution(self):
         """Start DNS resolution process"""
         ips = sorted(self.blocklist.blocked_ips)
         total = len(ips)
         
+        # Check if window still exists
+        if self.is_window_destroyed.is_set():
+            return
+        
         # Initial display of IPs
-        self.window.after(0, self._update_progress, 0, total, "Initial display setup...")
-        self.stats_vars["total"].set(f"Total: {total}")
+        self._safe_after(0, self._update_progress, 0, total, "Initial display setup...")
+        self._safe_after(0, lambda: self.stats_vars["total"].set(f"Total: {total}"))
         
         # Quick analysis for initial counts
         microsoft_count, cloud_count = self.dns_resolver.quick_analyze_ips(ips)
         
         # Insert all IPs initially
         for idx, ip in enumerate(ips):
+            if self.is_window_destroyed.is_set():
+                break
+                
             source = self.blocklist.sources.get(ip, "Unknown")
             
             # Quick detection for initial coloring
@@ -309,56 +369,76 @@ class BlockedIPsViewer:
                 tags.append("cloud")
                 source = f"{source} (Cloud)"
             
-            self.window.after(0, self._insert_tree_item, 
-                             idx, ip, "Resolving...", source, tuple(tags))
+            self._safe_after(0, self._insert_tree_item, idx, ip, "Resolving...", source, tuple(tags))
             
             if idx % 100 == 0:
-                self.window.after(0, self._update_stats, 
-                                 0, 0, 0, microsoft_count, cloud_count, total)
+                self._safe_after(0, self._update_stats, 0, 0, 0, microsoft_count, cloud_count, total)
         
-        # Start DNS resolution
+        # Start DNS resolution with safe callbacks
         stats = self.dns_resolver.batch_resolve(
             ips,
-            progress_callback=lambda curr, tot, msg: self.window.after(
+            progress_callback=lambda curr, tot, msg: self._safe_after(
                 0, self._update_progress, curr, tot, msg
-            ),
-            result_callback=lambda idx, ip, hostname, status, is_ms, is_cl: self.window.after(
+            ) if not self.is_window_destroyed.is_set() else None,
+            result_callback=lambda idx, ip, hostname, status, is_ms, is_cl: self._safe_after(
                 0, self._handle_dns_result, idx, ip, hostname, status, is_ms, is_cl
-            )
+            ) if not self.is_window_destroyed.is_set() else None
         )
         
-        # Final update
-        self.window.after(0, self._finalize_resolution, stats)
+        # Final update (only if window still exists)
+        if not self.is_window_destroyed.is_set():
+            self._safe_after(0, self._finalize_resolution, stats)
     
     def _insert_tree_item(self, idx: int, ip: str, hostname: str, source: str, tags: tuple):
         """Insert item into treeview (GUI thread)"""
-        self.tree.insert("", "end", text=str(idx + 1), 
-                        values=(ip, hostname, source), tags=tags)
+        if self.is_window_destroyed.is_set() or not self.window:
+            return
+            
+        try:
+            self.tree.insert("", "end", text=str(idx + 1), 
+                            values=(ip, hostname, source), tags=tags)
+        except:
+            # Window destroyed
+            self.is_window_destroyed.set()
     
     def _handle_dns_result(self, idx: int, ip: str, hostname: str, 
                           status: str, is_microsoft: bool, is_cloud: bool):
         """Handle DNS resolution result (GUI thread)"""
-        source = self.blocklist.sources.get(ip, "Unknown")
-        
-        # Enhance source with provider info if available
-        provider = self.ip_analyzer.get_provider_info(ip)
-        if provider != "Unknown ISP":
-            source = f"{source} ({provider})"
-        
-        self._update_tree_item(idx, ip, hostname, source, is_microsoft, is_cloud)
-        self._log_detail(f"Resolved {ip} -> {hostname}")
+        if self.is_window_destroyed.is_set():
+            return
+            
+        try:
+            source = self.blocklist.sources.get(ip, "Unknown")
+            
+            # Enhance source with provider info if available
+            provider = self.ip_analyzer.get_provider_info(ip)
+            if provider != "Unknown ISP":
+                source = f"{source} ({provider})"
+            
+            self._update_tree_item(idx, ip, hostname, source, is_microsoft, is_cloud)
+            self._log_detail(f"Resolved {ip} -> {hostname}")
+        except:
+            # Window destroyed during update
+            self.is_window_destroyed.set()
     
     def _finalize_resolution(self, stats: Dict):
         """Finalize resolution process (GUI thread)"""
-        self._update_progress(stats["total"], stats["total"], 
-                             f"✅ TURBO DNS resolution complete! "
-                             f"Resolved: {stats['resolved']}/{stats['total']} "
-                             f"(Microsoft: {stats['microsoft']}, Cloud: {stats['cloud']})")
-        
-        self._update_stats(stats["resolved"], stats["timeout"], stats["error"],
-                          stats["microsoft"], stats["cloud"], stats["total"])
-        
-        self._log_detail("✅ DNS resolution completed successfully!")
+        if self.is_window_destroyed.is_set():
+            return
+            
+        try:
+            self._update_progress(stats["total"], stats["total"], 
+                                 f"✅ TURBO DNS resolution complete! "
+                                 f"Resolved: {stats['resolved']}/{stats['total']} "
+                                 f"(Microsoft: {stats['microsoft']}, Cloud: {stats['cloud']})")
+            
+            self._update_stats(stats["resolved"], stats["timeout"], stats["error"],
+                              stats["microsoft"], stats["cloud"], stats["total"])
+            
+            self._log_detail("✅ DNS resolution completed successfully!")
+        except:
+            # Window destroyed during update
+            self.is_window_destroyed.set()
     
     def _unblock_selected(self):
         """Unblock selected IPs"""
