@@ -109,13 +109,30 @@ class FirewallManager:
         success_count = 0
         successful_ips = []  # Track which IPs were successfully processed
         failed_ips = []
+        skipped_duplicates = 0  # Track skipped duplicate IPs
         
         for idx, ip in enumerate(ips):
-            # When removing rules, check if IP is in firewall tracking
-            if not add and ip not in self._already_blocked_in_firewall:
-                continue
-            
             try:
+                # Validate IP first
+                is_valid, error = self.ip_validator.validate(ip)
+                if not is_valid:
+                    self.logger.warning(f"Skipping invalid IP {ip}: {error}")
+                    failed_ips.append(ip)
+                    continue
+                
+                # When adding rules: Check if IP is already blocked in firewall
+                if add and ip in self._already_blocked_in_firewall:
+                    skipped_duplicates += 1
+                    if progress_callback and idx % 10 == 0:
+                        progress_callback(idx + 1, total, f"Skipping duplicate IP: {ip}")
+                    continue
+                
+                # When removing rules: Check if IP is in firewall tracking
+                if not add and ip not in self._already_blocked_in_firewall:
+                    if progress_callback and idx % 10 == 0:
+                        progress_callback(idx + 1, total, f"Skipping IP not in firewall: {ip}")
+                    continue
+                
                 if progress_callback:
                     if add:
                         progress_text = f"Blocking IP {idx + 1}/{total}: {ip}"
@@ -134,7 +151,7 @@ class FirewallManager:
                         
                     if progress_callback and idx % 10 == 0:
                         if add:
-                            status_text = f"{success_count} of {total} IPs blocked"
+                            status_text = f"{success_count} of {total} IPs blocked ({skipped_duplicates} duplicates skipped)"
                         else:
                             status_text = f"{success_count} of {total} rules removed"
                         progress_callback(idx + 1, total, status_text)
@@ -149,9 +166,9 @@ class FirewallManager:
             if idx % 50 == 49:
                 if progress_callback:
                     if add:
-                        progress_status = f"Pausing to avoid firewall overload... ({success_count} blocked)"
+                        progress_status = f"Pausing... ({success_count} blocked, {skipped_duplicates} duplicates skipped)"
                     else:
-                        progress_status = f"Pausing to avoid firewall overload... ({success_count} removed)"
+                        progress_status = f"Pausing... ({success_count} removed)"
                     progress_callback(idx + 1, total, progress_status)
                 time.sleep(Config.BULK_BLOCK_DELAY)
             
@@ -161,19 +178,19 @@ class FirewallManager:
         if progress_callback:
             if failed_ips:
                 if add:
-                    result_text = f"Done! {success_count}/{total} blocked, {len(failed_ips)} failed"
+                    result_text = f"Done! {success_count} blocked, {skipped_duplicates} duplicates skipped, {len(failed_ips)} failed"
                 else:
-                    result_text = f"Done! {success_count}/{total} removed, {len(failed_ips)} failed"
+                    result_text = f"Done! {success_count} removed, {len(failed_ips)} failed"
                 progress_callback(total, total, result_text)
             else:
                 if add:
-                    result_text = f"✅ Success! All {success_count} IPs blocked"
+                    result_text = f"✅ Success! {success_count} IPs blocked ({skipped_duplicates} duplicates skipped)"
                 else:
                     result_text = f"✅ Success! All {success_count} firewall rules removed"
                 progress_callback(total, total, result_text)
         
         if add:
-            self.logger.info(f"Bulk blocking completed: {success_count}/{total} successful")
+            self.logger.info(f"Bulk blocking completed: {success_count}/{total} successful, {skipped_duplicates} duplicates skipped")
         else:
             self.logger.info(f"Bulk removal completed: {success_count}/{total} successful")
         

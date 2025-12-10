@@ -166,10 +166,18 @@ class BlocklistManager:
                 self.logger.warning(f"IP cannot be normalized: {ip}")
             raise ValidationError(f"IP cannot be normalized: {ip}")
 
+        # Check for duplicate IP (case-insensitive for sources comparison)
         if normalized_ip in self.blocked_ips:
-            if self.logger:
-                self.logger.debug(f"IP {normalized_ip} already blocked")
-            return
+            # Update source if different
+            current_source = self.sources.get(normalized_ip, "")
+            if current_source != source:
+                self.sources[normalized_ip] = f"{current_source}, {source}"
+                if self.logger:
+                    self.logger.debug(f"Updated source for duplicate IP {normalized_ip}: {self.sources[normalized_ip]}")
+            else:
+                if self.logger:
+                    self.logger.debug(f"IP {normalized_ip} already blocked with same source")
+            return  # Skip adding duplicate IP
 
         self.blocked_ips.add(normalized_ip)
         self.sources[normalized_ip] = source
@@ -264,8 +272,8 @@ class BlocklistManager:
 
     def _update_microsoft_list(self) -> int:
         """Load multiple current Microsoft telemetry blocklists with batch save"""
-        ips_to_add = []
-
+        all_new_ips = set()  # Use set to avoid duplicates
+        
         for url in Config.MICROSOFT_BLOCKLIST_URLS:
             try:
                 with urlopen(url, timeout=30) as resp:
@@ -274,36 +282,42 @@ class BlocklistManager:
                         content = raw.decode('utf-8')
                     except:
                         content = raw.decode('utf-8', errors='replace')
-
+                    
+                    url_new_ips = set()
+                    
                     for line in content.splitlines():
                         line = line.strip()
                         if not line or line.startswith('#'):
                             continue
-
+                        
                         # Handle different formats
                         parts = line.split()
                         if len(parts) >= 2:
                             # Format: "0.0.0.0 domain.com"
                             ip_part = parts[0]
                             if ip_part != "0.0.0.0" and ip_part != "127.0.0.1":
-                                if self._is_valid_ipv4(ip_part) and ip_part not in self.blocked_ips:
-                                    ips_to_add.append(ip_part)
-                        elif self._is_valid_ipv4(line) and line not in self.blocked_ips:
+                                if self._is_valid_ipv4(ip_part):
+                                    url_new_ips.add(ip_part)
+                        elif self._is_valid_ipv4(line):
                             # Format: just IP
-                            ips_to_add.append(line)
-
+                            url_new_ips.add(line)
+                    
+                    # Filter out IPs already in blocklist
+                    new_ips_for_url = url_new_ips - self.blocked_ips
+                    all_new_ips.update(new_ips_for_url)
+                    
                     if self.logger:
-                        self.logger.info(f"{url.split('/')[-1]} → {len(ips_to_add)} IPs queued")
-
+                        self.logger.info(f"{url.split('/')[-1]} → {len(new_ips_for_url)} new IPs")
+                        
             except Exception as e:
                 if self.logger:
                     self.logger.warning(f"Error loading {url}: {e}")
-
-        # Batch add all IPs with single save
-        if ips_to_add:
-            added_count = self.add_ips_batch(ips_to_add, "Dynamic List (Microsoft)")
+        
+        # Batch add all new IPs with single save
+        if all_new_ips:
+            added_count = self.add_ips_batch(list(all_new_ips), "Dynamic List (Microsoft)")
             return added_count
-
+        
         return 0
 
     def _is_valid_ipv4(self, ip: str) -> bool:

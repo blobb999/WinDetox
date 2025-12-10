@@ -1588,30 +1588,46 @@ class WinDetoxGUI:
         if not is_admin():
             messagebox.showwarning('Admin Rights Required', 'Full privacy mode requires administrator rights!\nPlease restart the application as administrator.')
             return
-        if not messagebox.askyesno('Full Privacy Mode', "🚫 COMPLETELY DE-SPY WINDOWS + KILL NCSI\n\nThis will:\n1. Block Microsoft telemetry IPs\n2. Block Microsoft domains via hosts file\n3. Disable Windows DoH\n4. Disable Delivery Optimization\n5. Stop Microsoft tracking services\n6. Disable NCSI (no more 'No Internet' messages!)\n\nWindows will then be as private as Linux Mint!\n⚠️ Without NCSI, no Windows internet detection!\n\nContinue?"):
+        
+        if not messagebox.askyesno('Full Privacy Mode', 
+                                  "🚫 COMPLETELY DE-SPY WINDOWS + KILL NCSI\n\nThis will:\n"
+                                  "1. Block Microsoft telemetry IPs\n"
+                                  "2. Block Microsoft domains via hosts file\n"
+                                  "3. Disable Windows DoH\n"
+                                  "4. Disable Delivery Optimization\n"
+                                  "5. Stop Microsoft tracking services\n"
+                                  "6. Disable NCSI (no more 'No Internet' messages!)\n\n"
+                                  "Windows will then be as private as Linux Mint!\n"
+                                  "⚠️ Without NCSI, no Windows internet detection!\n\nContinue?"):
             return
+        
         win = tk.Toplevel(self.root)
         win.title('Activating Complete Privacy Mode...')
         win.geometry('600x400')
         win.transient(self.root)
         win.grab_set()
         win.resizable(False, False)
+        
         title_label = ttk.Label(win, text='🛡️ Activating Complete Privacy Mode', font=('', 14, 'bold'))
         title_label.pack(pady=15)
+        
         progress_frame = ttk.Frame(win)
         progress_frame.pack(pady=10, padx=20, fill='x')
         progress_label = ttk.Label(progress_frame, text='Progress:', font=('', 10))
         progress_label.pack(anchor='w')
         progress = ttk.Progressbar(progress_frame, length=500, mode='determinate')
         progress.pack(fill='x', pady=(5, 0))
+        
         status_var = tk.StringVar(value='Initializing...')
         status_label = ttk.Label(win, textvariable=status_var, font=('', 10, 'bold'), wraplength=550)
         status_label.pack(pady=10)
+        
         details_frame = ttk.LabelFrame(win, text='Details', padding=10)
         details_frame.pack(pady=15, padx=20, fill='both', expand=True)
-        details_text = scrolledtext.ScrolledText(details_frame, height=12, width=70, state='disabled', font=('Consolas', 9))
+        details_text = scrolledtext.ScrolledText(details_frame, height=12, width=70, 
+                                               state='disabled', font=('Consolas', 9))
         details_text.pack(fill='both', expand=True)
-
+        
         def log_detail(message):
             """Add message to details log"""
             details_text.config(state='normal')
@@ -1619,7 +1635,7 @@ class WinDetoxGUI:
             details_text.see(tk.END)
             details_text.config(state='disabled')
             win.update_idletasks()
-
+        
         def update_status(message, value=None):
             """Update status and progress"""
             status_var.set(message)
@@ -1627,60 +1643,84 @@ class WinDetoxGUI:
                 progress['value'] = value
             log_detail(message)
             win.update_idletasks()
-        results = {'steps_completed': 0, 'total_steps': 7, 'errors': []}
-
+        
+        results = {
+            'steps_completed': 0,
+            'total_steps': 7,
+            'errors': [],
+            'ips_blocked': 0,
+            'firewall_rules_applied': 0
+        }
+        
         def run_privacy_mode():
             """Execute all privacy mode steps"""
             try:
-                update_status('Updating Microsoft blocklists...', 16)
+                # Step 1: Update Microsoft blocklists
+                update_status('Updating Microsoft blocklists...', 10)
                 try:
-                    added = self.network_service.blocklist._update_microsoft_list()
-                    update_status(f'✓ Added {added} Microsoft IPs to blocklist', 16)
-                    log_detail(f'Blocked {added} new Microsoft telemetry IPs')
+                    added_ips = self.network_service.blocklist._update_microsoft_list()
+                    results['ips_blocked'] = added_ips
+                    update_status(f'✓ Added {added_ips} Microsoft IPs to blocklist', 15)
+                    log_detail(f'Blocked {added_ips} new Microsoft telemetry IPs')
                     results['steps_completed'] += 1
                 except Exception as e:
                     error_msg = f'Failed to update blocklists: {str(e)[:100]}'
-                    update_status(f'⚠️ {error_msg}', 16)
+                    update_status(f'⚠️ {error_msg}', 15)
                     log_detail(f'ERROR: {str(e)}')
                     results['errors'].append(error_msg)
-                update_status('Applying firewall rules for blocked IPs...', 28)
+                
+                # Step 2: Apply firewall rules for ALL blocked IPs (not just new ones)
+                update_status('Applying firewall rules for all blocked IPs...', 25)
                 try:
                     blocklist = self.network_service.blocklist
-                    new_ips = [ip for ip in blocklist.blocked_ips if ip not in blocklist._firewall_applied_ips]
-                    if new_ips:
-                        update_status(f'Applying firewall rules for {len(new_ips)} IPs...', 28)
-
+                    all_blocked_ips = list(blocklist.blocked_ips)
+                    
+                    if all_blocked_ips:
+                        update_status(f'Applying firewall rules for {len(all_blocked_ips)} IPs...', 25)
+                        
                         def firewall_progress(current, total, text):
-                            progress_percent = 28 + current / total * 14 if total > 0 else 42
+                            progress_percent = 25 + (current / total * 25) if total > 0 else 50
                             win.after(0, lambda: update_status(f'Firewall: {current}/{total} IPs - {text}', progress_percent))
-                        blocked_count = self.network_service.firewall.apply_firewall_rules_bulk(new_ips, add=True, progress_callback=firewall_progress)
-                        for ip in new_ips:
-                            self.network_service.blocklist._firewall_applied_ips.add(ip)
-                        update_status(f'✓ Firewall rules applied for {blocked_count} IPs', 42)
-                        log_detail(f'Applied firewall rules for {blocked_count}/{len(new_ips)} IPs')
+                        
+                        # Apply firewall rules for ALL blocked IPs
+                        blocked_count, successful_ips = self.network_service.firewall.apply_firewall_rules_bulk(
+                            all_blocked_ips, add=True, progress_callback=firewall_progress
+                        )
+                        
+                        # Update firewall tracking for ALL successfully applied IPs
+                        for ip in successful_ips:
+                            blocklist._firewall_applied_ips.add(ip)
+                        
+                        results['firewall_rules_applied'] = blocked_count
+                        update_status(f'✓ Firewall rules applied for {blocked_count} IPs', 50)
+                        log_detail(f'Applied firewall rules for {blocked_count}/{len(all_blocked_ips)} IPs')
                     else:
-                        update_status('✓ No new firewall rules needed', 42)
-                        log_detail('All IPs already have firewall rules')
+                        update_status('✓ No IPs to block in firewall', 50)
+                        log_detail('No IPs in blocklist to apply firewall rules')
                     results['steps_completed'] += 1
                 except Exception as e:
                     error_msg = f'Failed to apply firewall rules: {str(e)[:100]}'
-                    update_status(f'⚠️ {error_msg}', 42)
+                    update_status(f'⚠️ {error_msg}', 50)
                     log_detail(f'ERROR: {str(e)}')
                     results['errors'].append(error_msg)
-                update_status('Blocking Microsoft domains via hosts file...', 56)
+                
+                # Step 3: Block Microsoft domains via hosts file
+                update_status('Blocking Microsoft domains via hosts file...', 60)
                 try:
                     if self.network_service.blocklist.block_microsoft_in_hosts():
-                        update_status('✓ Microsoft domains blocked in hosts file', 56)
+                        update_status('✓ Microsoft domains blocked in hosts file', 60)
                         log_detail('Added comprehensive Microsoft domain blocks to hosts file')
                     else:
-                        update_status('⚠️ Hosts file modification may have failed', 56)
+                        update_status('⚠️ Hosts file modification may have failed', 60)
                         log_detail('Hosts file modification returned False')
                     results['steps_completed'] += 1
                 except Exception as e:
                     error_msg = f'Failed to modify hosts file: {str(e)[:100]}'
-                    update_status(f'⚠️ {error_msg}', 56)
+                    update_status(f'⚠️ {error_msg}', 60)
                     log_detail(f'ERROR: {str(e)}')
                     results['errors'].append(error_msg)
+                
+                # Step 4: Disable Windows DNS over HTTPS (DoH)
                 update_status('Disabling Windows DNS over HTTPS (DoH)...', 70)
                 try:
                     if self.network_service.blocklist.disable_windows_doh():
@@ -1695,31 +1735,37 @@ class WinDetoxGUI:
                     update_status(f'⚠️ {error_msg}', 70)
                     log_detail(f'ERROR: {str(e)}')
                     results['errors'].append(error_msg)
-                update_status('Disabling Delivery Optimization...', 84)
+                
+                # Step 5: Disable Delivery Optimization
+                update_status('Disabling Delivery Optimization...', 80)
                 try:
                     if self.network_service.blocklist.disable_delivery_optimization():
-                        update_status('✓ Delivery Optimization disabled', 84)
+                        update_status('✓ Delivery Optimization disabled', 80)
                         log_detail('Disabled Windows Update peer-to-peer sharing')
                     else:
-                        update_status('⚠️ Delivery Optimization disable may have failed', 84)
+                        update_status('⚠️ Delivery Optimization disable may have failed', 80)
                         log_detail('Delivery Optimization disable returned False')
                     results['steps_completed'] += 1
                 except Exception as e:
                     error_msg = f'Failed to disable Delivery Optimization: {str(e)[:100]}'
-                    update_status(f'⚠️ {error_msg}', 84)
+                    update_status(f'⚠️ {error_msg}', 80)
                     log_detail(f'ERROR: {str(e)}')
                     results['errors'].append(error_msg)
-                update_status('Stopping Microsoft tracking services...', 92)
+                
+                # Step 6: Stop Microsoft tracking services
+                update_status('Stopping Microsoft tracking services...', 90)
                 try:
                     success = self.network_service.blocklist.disable_microsoft_services()
-                    update_status('✓ Microsoft telemetry services stopped', 92)
+                    update_status('✓ Microsoft telemetry services stopped', 90)
                     log_detail('Disabled Microsoft tracking and telemetry services')
                     results['steps_completed'] += 1
                 except Exception as e:
                     error_msg = f'Failed to stop services: {str(e)[:100]}'
-                    update_status(f'⚠️ {error_msg}', 92)
+                    update_status(f'⚠️ {error_msg}', 90)
                     log_detail(f'ERROR: {str(e)}')
                     results['errors'].append(error_msg)
+                
+                # Step 7: Disable NCSI
                 update_status('Disabling NCSI (Windows internet detection)...', 95)
                 try:
                     if self.network_service.blocklist.disable_ncsi():
@@ -1735,67 +1781,109 @@ class WinDetoxGUI:
                     update_status(f'⚠️ {error_msg}', 100)
                     log_detail(f'ERROR: {str(e)}')
                     results['errors'].append(error_msg)
+                
+                # Save the blocklist with all updates
                 self.network_service.blocklist.save_blocklist()
-
+                
                 def show_results():
                     win.destroy()
-                    summary = f"✅ Privacy Mode Activation Complete!\n\nSteps completed: {results['steps_completed']}/{results['total_steps']}\nTotal blocked IPs: {len(self.network_service.blocklist.blocked_ips)}\n"
+                    summary = (f"✅ Privacy Mode Activation Complete!\n\n"
+                              f"Steps completed: {results['steps_completed']}/{results['total_steps']}\n"
+                              f"IPs added to blocklist: {results['ips_blocked']}\n"
+                              f"Firewall rules applied: {results['firewall_rules_applied']}\n"
+                              f"Total blocked IPs: {len(self.network_service.blocklist.blocked_ips)}\n")
+                    
                     if results['errors']:
                         summary += f"\n⚠️ {len(results['errors'])} warnings:\n"
                         for i, error in enumerate(results['errors'][:3], 1):
                             summary += f'{i}. {error}\n'
                         if len(results['errors']) > 3:
                             summary += f"... and {len(results['errors']) - 3} more\n"
-                    summary += f"\n🔒 Your Windows is now de-spied!\n• Microsoft telemetry blocked\n• NCSI disabled (no 'No Internet' messages)\n• Windows is now as private as Linux Mint!"
+                    
+                    summary += (f"\n🔒 Your Windows is now de-spied!\n"
+                               f"• Microsoft telemetry blocked ({results['ips_blocked']} IPs)\n"
+                               f"• NCSI disabled (no 'No Internet' messages)\n"
+                               f"• Firewall actively blocking {results['firewall_rules_applied']} IPs\n"
+                               f"• Windows is now as private as Linux Mint!")
+                    
                     messagebox.showinfo('Privacy Mode Complete', summary)
-                    self.log_append('✅ Full privacy mode activated\n')
-                    self.status_var.set(f"Privacy mode active - {results['steps_completed']}/{results['total_steps']} steps complete")
+                    self.log_append(f'✅ Full privacy mode activated - {results["firewall_rules_applied"]} IPs blocked\n')
+                    self.status_var.set(f"Privacy mode active - {results['firewall_rules_applied']} IPs blocked")
+                
                 win.after(100, show_results)
+                
             except Exception as e:
-
                 def show_error():
                     win.destroy()
-                    messagebox.showerror('Critical Error', f'Privacy mode failed with critical error:\n\n{str(e)[:200]}')
+                    messagebox.showerror('Critical Error', 
+                                       f'Privacy mode failed with critical error:\n\n{str(e)[:200]}')
                     self.log_append(f'❌ Privacy mode failed: {e}\n')
                 win.after(0, show_error)
+        
         threading.Thread(target=run_privacy_mode, daemon=True).start()
-
+    
     def undo_full_privacy_mode(self):
-        """Undo full privacy mode - COMPLETE UNDO including NCSI and firewall rules"""
+        """Undo full privacy mode - COMPLETE UNDO including ALL firewall rules and blocked IPs"""
         if not is_admin():
-            messagebox.showwarning('Admin Rights Required', 'Undoing privacy mode requires administrator rights!\nPlease restart the application as administrator.')
+            messagebox.showwarning('Admin Rights Required', 
+                                  'Undoing privacy mode requires administrator rights!\n'
+                                  'Please restart the application as administrator.')
             return
-        if not messagebox.askyesno('Undo Full Privacy Mode', '🔄 COMPLETE UNDO - RESTORE ALL CHANGES\n\nThis will undo EVERYTHING:\n1. Restore hosts file\n2. Enable Windows DoH\n3. Enable Delivery Optimization\n4. Re-enable Microsoft services\n5. Enable NCSI (Windows internet detection)\n6. Remove ALL firewall rules for blocked IPs\n7. Remove ALL NCSI firewall rules\n8. Keep blocked IPs in blocklist (optional to clear)\n\nContinue?'):
+        
+        if not messagebox.askyesno('Undo Full Privacy Mode', 
+                                  '🔄 COMPLETE UNDO - RESTORE ALL CHANGES\n\n'
+                                  'This will undo EVERYTHING:\n'
+                                  '1. Restore hosts file\n'
+                                  '2. Enable Windows DoH\n'
+                                  '3. Enable Delivery Optimization\n'
+                                  '4. Re-enable Microsoft services\n'
+                                  '5. Enable NCSI (Windows internet detection)\n'
+                                  '6. Remove ALL WinDetox firewall rules\n'
+                                  '7. Remove ALL blocked IPs from blocklist\n\n'
+                                  'Continue?'):
             return
+        
         win = tk.Toplevel(self.root)
         win.title('Undoing Complete Privacy Mode...')
         win.geometry('600x450')
         win.transient(self.root)
         win.grab_set()
         win.resizable(False, False)
+        
         title_label = ttk.Label(win, text='🔄 Undoing Complete Privacy Mode', font=('', 14, 'bold'))
         title_label.pack(pady=15)
+        
         info_label = ttk.Label(win, text='Reverting all privacy mode changes...', font=('', 10))
         info_label.pack(pady=5)
+        
         progress_frame = ttk.Frame(win)
         progress_frame.pack(pady=10, padx=20, fill='x')
         progress_label = ttk.Label(progress_frame, text='Progress:', font=('', 10))
         progress_label.pack(anchor='w')
         progress = ttk.Progressbar(progress_frame, length=500, mode='determinate')
         progress.pack(fill='x', pady=(5, 0))
+        
         status_var = tk.StringVar(value='Initializing undo operations...')
         status_label = ttk.Label(win, textvariable=status_var, font=('', 10, 'bold'), wraplength=550)
         status_label.pack(pady=10)
+        
         stats_frame = ttk.Frame(win)
         stats_frame.pack(pady=10, padx=20, fill='x')
-        stats_vars = {'completed': tk.StringVar(value='Completed: 0/8'), 'current': tk.StringVar(value='Current: -')}
+        stats_vars = {
+            'completed': tk.StringVar(value='Completed: 0/7'),
+            'current': tk.StringVar(value='Current: -'),
+            'ips_removed': tk.StringVar(value='IPs removed: 0')
+        }
         ttk.Label(stats_frame, textvariable=stats_vars['completed']).pack(side='left', padx=10)
         ttk.Label(stats_frame, textvariable=stats_vars['current'], font=('', 9, 'italic')).pack(side='right', padx=10)
+        ttk.Label(stats_frame, textvariable=stats_vars['ips_removed']).pack(side='left', padx=10)
+        
         details_frame = ttk.LabelFrame(win, text='Operation Details', padding=10)
         details_frame.pack(pady=15, padx=20, fill='both', expand=True)
-        details_text = scrolledtext.ScrolledText(details_frame, height=10, width=70, state='disabled', font=('Consolas', 9))
+        details_text = scrolledtext.ScrolledText(details_frame, height=10, width=70, 
+                                               state='disabled', font=('Consolas', 9))
         details_text.pack(fill='both', expand=True)
-
+        
         def log_detail(message):
             """Add message to details log"""
             details_text.config(state='normal')
@@ -1803,22 +1891,32 @@ class WinDetoxGUI:
             details_text.see(tk.END)
             details_text.config(state='disabled')
             win.update_idletasks()
-
-        def update_progress(step, total_steps, message, current_operation=''):
+        
+        def update_progress(step, total_steps, message, current_operation='', ips_removed=0):
             """Update progress and status"""
-            progress_percent = step / total_steps * 100 if total_steps > 0 else 100
+            progress_percent = (step / total_steps * 100) if total_steps > 0 else 100
             progress['value'] = progress_percent
             status_var.set(message)
             stats_vars['completed'].set(f'Completed: {step}/{total_steps}')
             stats_vars['current'].set(f'Current: {current_operation}')
+            stats_vars['ips_removed'].set(f'IPs removed: {ips_removed}')
             log_detail(message)
             win.update_idletasks()
-        results = {'steps_completed': 0, 'total_steps': 8, 'errors': [], 'firewall_rules_removed': 0, 'successful_ips_removed': []}
-
+        
+        results = {
+            'steps_completed': 0,
+            'total_steps': 7,
+            'errors': [],
+            'firewall_rules_removed': 0,
+            'ips_removed': 0,
+            'blocked_ips_before_clear': 0
+        }
+        
         def run_complete_undo():
             """Execute all undo operations"""
             try:
-                update_progress(1, 8, 'Restoring hosts file from backup...', 'Hosts file')
+                # Step 1: Restore hosts file
+                update_progress(1, 7, 'Restoring hosts file from backup...', 'Hosts file')
                 try:
                     if self.network_service.blocklist.restore_hosts_file():
                         log_detail('✓ Hosts file restored from backup')
@@ -1831,7 +1929,9 @@ class WinDetoxGUI:
                     error_msg = f'Hosts restore error: {str(e)[:100]}'
                     log_detail(f'❌ {error_msg}')
                     results['errors'].append(error_msg)
-                update_progress(2, 8, 'Enabling Windows DNS over HTTPS (DoH)...', 'DoH')
+                
+                # Step 2: Enable Windows DoH
+                update_progress(2, 7, 'Enabling Windows DNS over HTTPS (DoH)...', 'DoH')
                 try:
                     if self.network_service.blocklist.enable_windows_doh():
                         log_detail('✓ Windows DoH enabled')
@@ -1844,7 +1944,9 @@ class WinDetoxGUI:
                     error_msg = f'DoH enable error: {str(e)[:100]}'
                     log_detail(f'❌ {error_msg}')
                     results['errors'].append(error_msg)
-                update_progress(3, 8, 'Enabling Delivery Optimization...', 'Delivery Optimization')
+                
+                # Step 3: Enable Delivery Optimization
+                update_progress(3, 7, 'Enabling Delivery Optimization...', 'Delivery Optimization')
                 try:
                     if self.network_service.blocklist.enable_delivery_optimization():
                         log_detail('✓ Delivery Optimization enabled')
@@ -1857,7 +1959,9 @@ class WinDetoxGUI:
                     error_msg = f'Delivery Optimization error: {str(e)[:100]}'
                     log_detail(f'❌ {error_msg}')
                     results['errors'].append(error_msg)
-                update_progress(4, 8, 'Enabling Microsoft tracking services...', 'Services')
+                
+                # Step 4: Enable Microsoft services
+                update_progress(4, 7, 'Enabling Microsoft tracking services...', 'Services')
                 try:
                     if self.network_service.blocklist.enable_microsoft_services():
                         log_detail('✓ Microsoft services enabled')
@@ -1870,7 +1974,9 @@ class WinDetoxGUI:
                     error_msg = f'Services enable error: {str(e)[:100]}'
                     log_detail(f'❌ {error_msg}')
                     results['errors'].append(error_msg)
-                update_progress(5, 8, 'Enabling NCSI (Windows internet detection)...', 'NCSI')
+                
+                # Step 5: Enable NCSI
+                update_progress(5, 7, 'Enabling NCSI (Windows internet detection)...', 'NCSI')
                 try:
                     if self.network_service.blocklist.enable_ncsi():
                         log_detail('✓ NCSI enabled - Windows internet detection restored')
@@ -1884,93 +1990,158 @@ class WinDetoxGUI:
                     error_msg = f'NCSI enable error: {str(e)[:100]}'
                     log_detail(f'❌ {error_msg}')
                     results['errors'].append(error_msg)
-                update_progress(6, 8, 'Removing firewall rules for blocked IPs...', 'Firewall rules')
+                
+                # Step 6: Remove ALL WinDetox firewall rules (comprehensive cleanup)
+                update_progress(6, 7, 'Removing ALL WinDetox firewall rules...', 'Firewall cleanup')
                 try:
-                    firewall_applied_ips = list(self.network_service.blocklist._firewall_applied_ips)
-                    if firewall_applied_ips:
-                        log_detail(f'Removing firewall rules for {len(firewall_applied_ips)} IPs...')
-
+                    # First, remove firewall rules for each blocked IP individually
+                    blocked_ips_list = list(self.network_service.blocklist.blocked_ips)
+                    if blocked_ips_list:
+                        log_detail(f'Removing firewall rules for {len(blocked_ips_list)} blocked IPs...')
+                        
                         def firewall_progress(current, total, text):
-                            progress_percent = 75 + current / total * 12 if total > 0 else 87
-                            win.after(0, lambda: update_progress(6, 8, f'Firewall: {current}/{total} IPs - {text}', 'Firewall rules'))
-                        removed_count, successful_ips = self.network_service.firewall.apply_firewall_rules_bulk(firewall_applied_ips, add=False, progress_callback=firewall_progress)
+                            progress_percent = 71 + (current / total * 14) if total > 0 else 85
+                            win.after(0, lambda: update_progress(6, 7, f'Firewall: {current}/{total} IPs - {text}', 
+                                                                 'Firewall cleanup', results['ips_removed']))
+                        
+                        # Remove firewall rules for all blocked IPs
+                        removed_count, successful_ips = self.network_service.firewall.apply_firewall_rules_bulk(
+                            blocked_ips_list, add=False, progress_callback=firewall_progress
+                        )
+                        
                         results['firewall_rules_removed'] = removed_count
-                        results['successful_ips_removed'] = successful_ips
-                        for ip in successful_ips:
-                            self.network_service.blocklist._firewall_applied_ips.discard(ip)
-                        log_detail(f'✓ Removed firewall rules for {removed_count}/{len(firewall_applied_ips)} IPs')
-                        log_detail(f'✓ Updated firewall tracking for {len(successful_ips)} IPs')
-                    else:
-                        log_detail('✓ No firewall rules to remove')
-                        results['firewall_rules_removed'] = 0
-                    results['steps_completed'] += 1
-                except Exception as e:
-                    error_msg = f'Firewall removal error: {str(e)[:100]}'
-                    log_detail(f'❌ {error_msg}')
-                    results['errors'].append(error_msg)
-                update_progress(7, 8, 'Cleaning up remaining WinDetox firewall rules...', 'Cleanup')
-                try:
-                    cleanup_script = '\n                    # Remove any remaining WinDetox firewall rules\n                    $rules = Get-NetFirewallRule -DisplayName "*WinDetox*" -ErrorAction SilentlyContinue\n                    foreach ($rule in $rules) {\n                        Remove-NetFirewallRule -DisplayName $rule.DisplayName -Confirm:$false -ErrorAction SilentlyContinue\n                    }\n                    \n                    # Also remove via netsh\n                    netsh advfirewall firewall delete rule name="WinDetox_*" -ErrorAction SilentlyContinue 2>&1 | Out-Null\n                    Write-Output "Cleanup completed"\n                    '
+                        log_detail(f'✓ Removed firewall rules for {removed_count}/{len(blocked_ips_list)} IPs')
+                    
+                    # Then, comprehensive PowerShell script to remove ALL remaining WinDetox firewall rules
+                    cleanup_script = """
+                    # Remove ALL WinDetox firewall rules using both methods
+                    
+                    Write-Output "Removing ALL WinDetox firewall rules..."
+                    
+                    # Method 1: PowerShell cmdlets
+                    $winDetoxRules = Get-NetFirewallRule -DisplayName "*WinDetox*" -ErrorAction SilentlyContinue
+                    if ($winDetoxRules) {
+                        Write-Output "Found $($winDetoxRules.Count) WinDetox rules via PowerShell"
+                        foreach ($rule in $winDetoxRules) {
+                            Remove-NetFirewallRule -DisplayName $rule.DisplayName -Confirm:$false -ErrorAction SilentlyContinue
+                            Write-Output "  Removed: $($rule.DisplayName)"
+                        }
+                    }
+                    
+                    # Method 2: netsh commands for compatibility
+                    Write-Output "Removing WinDetox rules via netsh..."
+                    
+                    # Remove nuclear rules
+                    $nuclearRules = @(
+                        "WinDetox_Nuclear_In",
+                        "WinDetox_Nuclear_Out", 
+                        "WinDetox_Allow_Loopback",
+                        "WinDetox_Allow_DNS",
+                        "WinDetox_Block_DoT_DoH"
+                    )
+                    
+                    foreach ($rule in $nuclearRules) {
+                        netsh advfirewall firewall delete rule name="$rule" -ErrorAction SilentlyContinue 2>&1 | Out-Null
+                    }
+                    
+                    # Remove ALL rules with WinDetox_Block_ prefix
+                    netsh advfirewall firewall delete rule name="WinDetox_Block_*" -ErrorAction SilentlyContinue 2>&1 | Out-Null
+                    
+                    # Remove ALL rules with WinDetox prefix (catch-all)
+                    netsh advfirewall firewall delete rule name="WinDetox_*" -ErrorAction SilentlyContinue 2>&1 | Out-Null
+                    
+                    Write-Output "Firewall cleanup completed"
+                    """
+                    
                     with tempfile.NamedTemporaryFile(mode='w', suffix='.ps1', delete=False, encoding='utf-8') as f:
                         f.write(cleanup_script)
                         temp_script = f.name
-                    result = safe_subprocess_run(['powershell', '-ExecutionPolicy', 'Bypass', '-File', temp_script], capture_output=True, text=True, timeout=30)
+                    
+                    result = safe_subprocess_run(
+                        ['powershell', '-ExecutionPolicy', 'Bypass', '-File', temp_script],
+                        capture_output=True, text=True, timeout=30
+                    )
                     os.remove(temp_script)
+                    
                     if result.returncode == 0:
-                        log_detail('✓ Remaining WinDetox firewall rules cleaned up')
+                        log_detail('✓ ALL WinDetox firewall rules removed')
                     else:
-                        log_detail('⚠️ Some cleanup operations may have failed')
+                        log_detail(f'⚠️ Some firewall rules may not have been removed: {result.stderr[:100]}')
+                    
                     results['steps_completed'] += 1
+                    
                 except Exception as e:
-                    error_msg = f'Cleanup error: {str(e)[:100]}'
-                    log_detail(f'⚠️ {error_msg}')
-                    results['errors'].append(error_msg)
-                update_progress(8, 8, 'Saving blocklist configuration...', 'Save config')
-                try:
-                    self.network_service.blocklist.save_blocklist()
-                    log_detail('✓ Blocklist configuration saved')
-                    results['steps_completed'] += 1
-                except Exception as e:
-                    error_msg = f'Save error: {str(e)[:100]}'
+                    error_msg = f'Firewall cleanup error: {str(e)[:100]}'
                     log_detail(f'❌ {error_msg}')
                     results['errors'].append(error_msg)
-
+                
+                # Step 7: Clear ALL blocked IPs from blocklist
+                update_progress(7, 7, 'Clearing ALL blocked IPs from blocklist...', 'Blocklist cleanup')
+                try:
+                    # Get count before clearing
+                    results['blocked_ips_before_clear'] = len(self.network_service.blocklist.blocked_ips)
+                    
+                    # Clear ALL blocked IPs from all tracking sets
+                    self.network_service.blocklist.blocked_ips.clear()
+                    self.network_service.blocklist.sources.clear()
+                    self.network_service.blocklist._firewall_applied_ips.clear()
+                    
+                    # Save empty blocklist
+                    self.network_service.blocklist.save_blocklist()
+                    
+                    results['ips_removed'] = results['blocked_ips_before_clear']
+                    log_detail(f'✓ Removed {results["blocked_ips_before_clear"]} IPs from blocklist')
+                    log_detail('✓ Cleared all sources and firewall tracking')
+                    log_detail('✓ Blocklist file saved empty')
+                    
+                    results['steps_completed'] += 1
+                    
+                except Exception as e:
+                    error_msg = f'Blocklist clear error: {str(e)[:100]}'
+                    log_detail(f'❌ {error_msg}')
+                    results['errors'].append(error_msg)
+                
                 def show_results():
                     win.destroy()
-                    clear_blocklist = False
-                    if messagebox.askyesno('Clear Blocklist?', f"✅ Privacy mode completely undone!\n\nSteps completed: {results['steps_completed']}/8\nFirewall rules removed: {results['firewall_rules_removed']}\nIPs removed from firewall tracking: {len(results['successful_ips_removed'])}\n\nDo you also want to CLEAR the blocklist?\n(Remove all IPs from the blocked list)"):
-                        try:
-                            self.network_service.blocklist.blocked_ips.clear()
-                            self.network_service.blocklist.sources.clear()
-                            self.network_service.blocklist.save_blocklist()
-                            clear_blocklist = True
-                        except Exception as e:
-                            messagebox.showerror('Error', f'Failed to clear blocklist: {e}')
-                    summary = f"✅ COMPLETE UNDO FINISHED!\n\nSteps completed: {results['steps_completed']}/8\nFirewall rules removed: {results['firewall_rules_removed']}\nIPs removed from firewall tracking: {len(results['successful_ips_removed'])}\n"
-                    if clear_blocklist:
-                        summary += f'Blocklist: CLEARED (all IPs removed)\n'
-                    else:
-                        summary += f'Blocklist: KEPT (IPs remain in list but firewall rules removed)\n'
+                    
+                    summary = (f"✅ COMPLETE UNDO FINISHED!\n\n"
+                              f"Steps completed: {results['steps_completed']}/7\n"
+                              f"IPs removed from blocklist: {results['ips_removed']}\n"
+                              f"Firewall rules removed: {results['firewall_rules_removed']}\n")
+                    
                     if results['errors']:
                         summary += f"\n⚠️ {len(results['errors'])} warnings:\n"
                         for i, error in enumerate(results['errors'][:3], 1):
                             summary += f'{i}. {error}\n'
                         if len(results['errors']) > 3:
                             summary += f"... and {len(results['errors']) - 3} more\n"
-                    summary += f'\n🔄 System restored to original state:\n• Hosts file restored\n• DoH enabled\n• Delivery Optimization enabled\n• Microsoft services running\n• NCSI active (Windows can detect internet)\n• ALL firewall rules removed (blocked IPs + NCSI)\n• Remaining WinDetox rules cleaned up\n'
+                    
+                    summary += (f"\n🔄 System COMPLETELY restored:\n"
+                              f"• Hosts file restored to original state\n"
+                              f"• DoH enabled\n"
+                              f"• Delivery Optimization enabled\n"
+                              f"• Microsoft services running\n"
+                              f"• NCSI active (Windows internet detection restored)\n"
+                              f"• ALL WinDetox firewall rules removed\n"
+                              f"• ALL {results['ips_removed']} blocked IPs cleared\n"
+                              f"• Firewall tracking completely reset\n")
+                    
                     messagebox.showinfo('Complete Undo Finished', summary)
-                    self.log_append('✅ Complete privacy mode undone - ALL changes reverted\n')
-                    self.status_var.set('Privacy mode completely undone')
+                    self.log_append(f'✅ Complete privacy mode undone - {results["ips_removed"]} IPs removed\n')
+                    self.status_var.set(f'Privacy mode undone - {results["ips_removed"]} IPs removed')
+                
                 win.after(100, show_results)
+                
             except Exception as e:
-
                 def show_error():
                     win.destroy()
-                    messagebox.showerror('Critical Error', f'Undo operation failed with critical error:\n\n{str(e)[:200]}')
+                    messagebox.showerror('Critical Error', 
+                                       f'Undo operation failed with critical error:\n\n{str(e)[:200]}')
                     self.log_append(f'❌ Privacy mode undo failed: {e}\n')
                 win.after(0, show_error)
+        
         threading.Thread(target=run_complete_undo, daemon=True).start()
-
+    
     def show_tray_notification(self, title: str, message: str):
         """Show notification from system tray"""
         if self.settings.get('show_notifications', True):
