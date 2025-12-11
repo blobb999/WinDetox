@@ -87,7 +87,8 @@ class FirewallManager:
         return param
 
     def apply_firewall_rules_bulk(self, ips: List[str], add: bool = True, 
-                                 progress_callback: Callable = None) -> Tuple[int, List[str]]:
+                                 progress_callback: Callable = None,
+                                 already_applied_ips: Set[str] = None) -> Tuple[int, List[str]]:
         """Block or unblock hundreds of IPs at once with progress feedback - RETURNS successful IPs"""
         if not self.check_admin_rights():
             raise PermissionError("Bulk firewall operations require admin rights!")
@@ -97,6 +98,12 @@ class FirewallManager:
             if progress_callback:
                 progress_callback(0, 0, "No IPs to process")
             return 0, []  # Return empty list for successful operations
+        
+        # Use provided already_applied_ips if available, otherwise use internal tracking
+        if already_applied_ips is not None:
+            current_blocked_set = already_applied_ips.copy()
+        else:
+            current_blocked_set = self._already_blocked_in_firewall.copy()
         
         if add:
             action_text = f"Starting bulk blocking of {total} IPs..."
@@ -110,6 +117,7 @@ class FirewallManager:
         successful_ips = []  # Track which IPs were successfully processed
         failed_ips = []
         skipped_duplicates = 0  # Track skipped duplicate IPs
+        skipped_existing = 0  # Track IPs already in firewall
         
         for idx, ip in enumerate(ips):
             try:
@@ -121,14 +129,14 @@ class FirewallManager:
                     continue
                 
                 # When adding rules: Check if IP is already blocked in firewall
-                if add and ip in self._already_blocked_in_firewall:
-                    skipped_duplicates += 1
+                if add and ip in current_blocked_set:
+                    skipped_existing += 1
                     if progress_callback and idx % 10 == 0:
-                        progress_callback(idx + 1, total, f"Skipping duplicate IP: {ip}")
+                        progress_callback(idx + 1, total, f"Skipping IP already in firewall: {ip}")
                     continue
                 
                 # When removing rules: Check if IP is in firewall tracking
-                if not add and ip not in self._already_blocked_in_firewall:
+                if not add and ip not in current_blocked_set:
                     if progress_callback and idx % 10 == 0:
                         progress_callback(idx + 1, total, f"Skipping IP not in firewall: {ip}")
                     continue
@@ -144,14 +152,15 @@ class FirewallManager:
                 if self.apply_windows_firewall_rule_atomic(ip, add):
                     success_count += 1
                     successful_ips.append(ip)  # Add to successful list
+                    
                     if add:
-                        self._already_blocked_in_firewall.add(ip)
+                        current_blocked_set.add(ip)
                     else:
-                        self._already_blocked_in_firewall.discard(ip)
+                        current_blocked_set.discard(ip)
                         
                     if progress_callback and idx % 10 == 0:
                         if add:
-                            status_text = f"{success_count} of {total} IPs blocked ({skipped_duplicates} duplicates skipped)"
+                            status_text = f"{success_count} of {total} IPs blocked ({skipped_existing} already in firewall, {skipped_duplicates} duplicates skipped)"
                         else:
                             status_text = f"{success_count} of {total} rules removed"
                         progress_callback(idx + 1, total, status_text)
@@ -166,7 +175,7 @@ class FirewallManager:
             if idx % 50 == 49:
                 if progress_callback:
                     if add:
-                        progress_status = f"Pausing... ({success_count} blocked, {skipped_duplicates} duplicates skipped)"
+                        progress_status = f"Pausing... ({success_count} blocked, {skipped_existing} already in firewall, {skipped_duplicates} duplicates skipped)"
                     else:
                         progress_status = f"Pausing... ({success_count} removed)"
                     progress_callback(idx + 1, total, progress_status)
@@ -175,22 +184,25 @@ class FirewallManager:
             # Small delay to keep GUI responsive
             time.sleep(0.01)
         
+        # Update internal tracking
+        self._already_blocked_in_firewall = current_blocked_set
+        
         if progress_callback:
             if failed_ips:
                 if add:
-                    result_text = f"Done! {success_count} blocked, {skipped_duplicates} duplicates skipped, {len(failed_ips)} failed"
+                    result_text = f"Done! {success_count} blocked, {skipped_existing} already in firewall, {skipped_duplicates} duplicates skipped, {len(failed_ips)} failed"
                 else:
                     result_text = f"Done! {success_count} removed, {len(failed_ips)} failed"
                 progress_callback(total, total, result_text)
             else:
                 if add:
-                    result_text = f"✅ Success! {success_count} IPs blocked ({skipped_duplicates} duplicates skipped)"
+                    result_text = f"✅ Success! {success_count} IPs blocked ({skipped_existing} already in firewall, {skipped_duplicates} duplicates skipped)"
                 else:
                     result_text = f"✅ Success! All {success_count} firewall rules removed"
                 progress_callback(total, total, result_text)
         
         if add:
-            self.logger.info(f"Bulk blocking completed: {success_count}/{total} successful, {skipped_duplicates} duplicates skipped")
+            self.logger.info(f"Bulk blocking completed: {success_count}/{total} successful, {skipped_existing} already in firewall, {skipped_duplicates} duplicates skipped")
         else:
             self.logger.info(f"Bulk removal completed: {success_count}/{total} successful")
         
@@ -378,6 +390,44 @@ class FirewallManager:
             is_valid, error = self.ip_validator.validate(ip)
             if not is_valid:
                 raise ValidationError(f"Invalid IP address {ip}: {error}")
+            
+            # Special handling for NCSI IPs - check all related rules
+            if ip in ["131.107.255.255", "20.112.52.29"]:
+                self.logger.info(f"Special handling for NCSI IP: {ip}")
+                
+                # Check if any NCSI firewall rules already exist
+                existing_ncsi_rules = []
+                ncsi_rule_patterns = [
+                    "WinDetox_Block_NCSI_HTTP",
+                    "WinDetox_Block_NCSI_HTTPS",
+                    "WinDetox_Block_NCSI_DNS",
+                    "WinDetox_Block_NCSI_TCP_443"
+                ]
+                
+                for pattern in ncsi_rule_patterns:
+                    try:
+                        check_cmd = [
+                            "netsh", "advfirewall", "firewall", "show", "rule",
+                            f"name={pattern}"
+                        ]
+                        
+                        check_result = safe_subprocess_run(
+                            check_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=3
+                        )
+                        
+                        if check_result.returncode == 0 and "Rule Name:" in check_result.stdout:
+                            existing_ncsi_rules.append(pattern)
+                            self.logger.debug(f"NCSI rule already exists: {pattern}")
+                            
+                    except Exception as e:
+                        self.logger.debug(f"Error checking NCSI rule {pattern}: {e}")
+                
+                if add and existing_ncsi_rules:
+                    self.logger.info(f"Skipping NCSI IP {ip} - {len(existing_ncsi_rules)} NCSI rules already exist")
+                    return True  # Return success to avoid rollback
             
             # Define all rules that need to be applied
             protocols = ["any", "icmpv4"]

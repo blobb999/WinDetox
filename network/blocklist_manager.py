@@ -448,31 +448,57 @@ class BlocklistManager:
             $newContent += $hostsEntries
             Set-Content -Path $hostsFile -Value $newContent -Encoding UTF8 -Force
             
-            # 9. Block NCSI via Windows Firewall
-            # Block HTTP/HTTPS access to NCSI servers
-            netsh advfirewall firewall add rule name="WinDetox_Block_NCSI_HTTP" dir=out action=block protocol=TCP remoteport=80 remoteip=131.107.255.255 enable=yes 2>&1 | Out-Null
-            netsh advfirewall firewall add rule name="WinDetox_Block_NCSI_HTTPS" dir=out action=block protocol=TCP remoteport=443 remoteip=131.107.255.255 enable=yes 2>&1 | Out-Null
-            netsh advfirewall firewall add rule name="WinDetox_Block_NCSI_DNS" dir=out action=block protocol=UDP remoteport=53 remoteip=131.107.255.255 enable=yes 2>&1 | Out-Null
+            # 9. Block NCSI via Windows Firewall with duplicate check
+            # Function to add firewall rule only if it doesn't exist
+            function Add-FirewallRule-IfNotExists {
+                param(
+                    [string]$RuleName,
+                    [string]$Direction,
+                    [string]$Action,
+                    [string]$Protocol,
+                    [string]$RemotePort,
+                    [string]$RemoteIP
+                )
+                
+                # Check if rule already exists
+                $checkResult = netsh advfirewall firewall show rule name="$RuleName" 2>&1
+                if ($LASTEXITCODE -eq 0 -and $checkResult -like "*Rule Name:*") {
+                    Write-Output "Firewall rule '$RuleName' already exists, skipping"
+                    return $true
+                }
+                
+                # Add the rule if it doesn't exist
+                $addResult = netsh advfirewall firewall add rule name="$RuleName" dir=$Direction action=$Action protocol=$Protocol remoteport=$RemotePort remoteip=$RemoteIP enable=yes 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Output "Firewall rule '$RuleName' added successfully"
+                    return $true
+                } else {
+                    Write-Output "Failed to add firewall rule '$RuleName': $addResult"
+                    return $false
+                }
+            }
             
-            # 10. Additional blockers for modern Windows 11 versions
-            # Block TCP 443 for NCSI fallbacks
-            netsh advfirewall firewall add rule name="WinDetox_Block_NCSI_TCP_443" dir=out action=block protocol=TCP remoteport=443 remoteip=20.112.52.29 enable=yes 2>&1 | Out-Null
+            # Add NCSI firewall rules only if they don't exist
+            $rule1 = Add-FirewallRule-IfNotExists -RuleName "WinDetox_Block_NCSI_HTTP" -Direction "out" -Action "block" -Protocol "TCP" -RemotePort "80" -RemoteIP "131.107.255.255"
+            $rule2 = Add-FirewallRule-IfNotExists -RuleName "WinDetox_Block_NCSI_HTTPS" -Direction "out" -Action "block" -Protocol "TCP" -RemotePort "443" -RemoteIP "131.107.255.255"
+            $rule3 = Add-FirewallRule-IfNotExists -RuleName "WinDetox_Block_NCSI_DNS" -Direction "out" -Action "block" -Protocol "UDP" -RemotePort "53" -RemoteIP "131.107.255.255"
+            $rule4 = Add-FirewallRule-IfNotExists -RuleName "WinDetox_Block_NCSI_TCP_443" -Direction "out" -Action "block" -Protocol "TCP" -RemotePort "443" -RemoteIP "20.112.52.29"
             
-            # 11. Kill NCSI processes if running
+            # 10. Kill NCSI processes if running
             Get-Process -Name "nla" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             Get-Process -Name "svchost" -ErrorAction SilentlyContinue | Where-Object { $_.Modules.ModuleName -contains "nlasvc.dll" } | Stop-Process -Force -ErrorAction SilentlyContinue
             
-            # 12. Clear DNS cache
+            # 11. Clear DNS cache
             ipconfig /flushdns 2>&1 | Out-Null
             
-            # 13. Reset network stack
+            # 12. Reset network stack
             netsh int ip reset 2>&1 | Out-Null
             netsh winsock reset 2>&1 | Out-Null
             
             Write-Output "✅ NCSI COMPLETELY DISABLED - Windows will NEVER show 'No Internet connection'!"
             Write-Output "   • Registry entries set"
             Write-Output "   • Hosts file blocked"
-            Write-Output "   • Firewall rules active"
+            Write-Output "   • Firewall rules checked/added"
             Write-Output "   • Services disabled"
             """
             

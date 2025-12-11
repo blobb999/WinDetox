@@ -1649,7 +1649,8 @@ class WinDetoxGUI:
             'total_steps': 7,
             'errors': [],
             'ips_blocked': 0,
-            'firewall_rules_applied': 0
+            'firewall_rules_applied': 0,
+            'skipped_existing': 0
         }
         
         def run_privacy_mode():
@@ -1669,7 +1670,7 @@ class WinDetoxGUI:
                     log_detail(f'ERROR: {str(e)}')
                     results['errors'].append(error_msg)
                 
-                # Step 2: Apply firewall rules for ALL blocked IPs (not just new ones)
+                # Step 2: Apply firewall rules for ALL blocked IPs
                 update_status('Applying firewall rules for all blocked IPs...', 25)
                 try:
                     blocklist = self.network_service.blocklist
@@ -1682,18 +1683,30 @@ class WinDetoxGUI:
                             progress_percent = 25 + (current / total * 25) if total > 0 else 50
                             win.after(0, lambda: update_status(f'Firewall: {current}/{total} IPs - {text}', progress_percent))
                         
+                        # Get already applied IPs from blocklist to avoid duplicates
+                        already_applied_ips = set(blocklist._firewall_applied_ips)
+                        
                         # Apply firewall rules for ALL blocked IPs
                         blocked_count, successful_ips = self.network_service.firewall.apply_firewall_rules_bulk(
-                            all_blocked_ips, add=True, progress_callback=firewall_progress
+                            all_blocked_ips, 
+                            add=True, 
+                            progress_callback=firewall_progress,
+                            already_applied_ips=already_applied_ips
                         )
+                        
+                        # Calculate skipped IPs
+                        skipped_count = len(all_blocked_ips) - len(successful_ips)
+                        results['skipped_existing'] = skipped_count
                         
                         # Update firewall tracking for ALL successfully applied IPs
                         for ip in successful_ips:
                             blocklist._firewall_applied_ips.add(ip)
                         
                         results['firewall_rules_applied'] = blocked_count
-                        update_status(f'✓ Firewall rules applied for {blocked_count} IPs', 50)
+                        update_status(f'✓ Firewall rules applied for {blocked_count} IPs ({skipped_count} already in firewall)', 50)
                         log_detail(f'Applied firewall rules for {blocked_count}/{len(all_blocked_ips)} IPs')
+                        if skipped_count > 0:
+                            log_detail(f'Skipped {skipped_count} IPs that were already in firewall')
                     else:
                         update_status('✓ No IPs to block in firewall', 50)
                         log_detail('No IPs in blocklist to apply firewall rules')
@@ -1790,7 +1803,8 @@ class WinDetoxGUI:
                     summary = (f"✅ Privacy Mode Activation Complete!\n\n"
                               f"Steps completed: {results['steps_completed']}/{results['total_steps']}\n"
                               f"IPs added to blocklist: {results['ips_blocked']}\n"
-                              f"Firewall rules applied: {results['firewall_rules_applied']}\n"
+                              f"Firewall rules applied: {results['firewall_rules_applied']} (new)\n"
+                              f"Skipped (already in firewall): {results['skipped_existing']}\n"
                               f"Total blocked IPs: {len(self.network_service.blocklist.blocked_ips)}\n")
                     
                     if results['errors']:
@@ -1803,12 +1817,12 @@ class WinDetoxGUI:
                     summary += (f"\n🔒 Your Windows is now de-spied!\n"
                                f"• Microsoft telemetry blocked ({results['ips_blocked']} IPs)\n"
                                f"• NCSI disabled (no 'No Internet' messages)\n"
-                               f"• Firewall actively blocking {results['firewall_rules_applied']} IPs\n"
+                               f"• Firewall actively blocking {len(self.network_service.blocklist._firewall_applied_ips)} IPs\n"
                                f"• Windows is now as private as Linux Mint!")
                     
                     messagebox.showinfo('Privacy Mode Complete', summary)
-                    self.log_append(f'✅ Full privacy mode activated - {results["firewall_rules_applied"]} IPs blocked\n')
-                    self.status_var.set(f"Privacy mode active - {results['firewall_rules_applied']} IPs blocked")
+                    self.log_append(f'✅ Full privacy mode activated - {results["firewall_rules_applied"]} new IPs blocked, {results["skipped_existing"]} already in firewall\n')
+                    self.status_var.set(f"Privacy mode active - {len(self.network_service.blocklist._firewall_applied_ips)} IPs blocked")
                 
                 win.after(100, show_results)
                 
